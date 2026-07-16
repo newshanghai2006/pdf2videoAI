@@ -6,6 +6,7 @@ from openai import APIStatusError, BadRequestError, OpenAI
 import httpx
 
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL, ART_STYLES
+from .rate_limiter import nvidia_limiter
 
 
 def get_client(api_key=None, base_url=None):
@@ -21,7 +22,12 @@ def get_client(api_key=None, base_url=None):
     if not url.startswith(("http://", "https://")):
         raise ValueError("API Base URL 必须以 http:// 或 https:// 开头")
     timeout = httpx.Timeout(connect=15.0, read=300.0, write=60.0, pool=15.0)
-    return OpenAI(api_key=key, base_url=url, timeout=timeout, max_retries=1)
+    is_nvidia = "nvidia" in url.lower() or key.startswith("nvapi-")
+    # SDK 内置重试不会经过限速器；NVIDIA 改为关闭内置重试，避免突破 RPM。
+    client = OpenAI(api_key=key, base_url=url, timeout=timeout,
+                    max_retries=0 if is_nvidia else 1)
+    client._pdf2video_is_nvidia = is_nvidia
+    return client
 
 
 def _is_gpt5(model):
@@ -69,6 +75,8 @@ def _chat(client, model, messages, temperature=0.7, json_mode=False,
         kwargs["response_format"] = {"type": "json_object"}
 
     try:
+        if getattr(client, "_pdf2video_is_nvidia", False):
+            nvidia_limiter.wait()
         return _collect_stream(client.chat.completions.create(**kwargs))
     except Exception as e:
         # 少数兼容网关虽然使用 GPT-5 名称，但只实现了旧参数。
@@ -76,6 +84,8 @@ def _chat(client, model, messages, temperature=0.7, json_mode=False,
             kwargs.pop(token_parameter)
             fallback = "max_tokens" if token_parameter == "max_completion_tokens" else "max_completion_tokens"
             kwargs[fallback] = max_tokens
+            if getattr(client, "_pdf2video_is_nvidia", False):
+                nvidia_limiter.wait()
             return _collect_stream(client.chat.completions.create(**kwargs))
         raise
 

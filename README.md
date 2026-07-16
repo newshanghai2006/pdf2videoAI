@@ -152,6 +152,13 @@ NVIDIA 文本模型通过 OpenAI 兼容 Chat Completions 使用。NVIDIA 图像�
 NIM 图像端点适配；当前预设包含 FLUX.2 klein 4B 和 Stable Diffusion XL。免费额度、模型可用性和请求参数
 以 NVIDIA API Catalog 当前页面为准。
 
+NVIDIA 免费额度按 40 RPM 限制处理。程序在进程内对 NVIDIA LLM、连接测试、Flux/SDXL
+生图和参数重试使用同一个限速器，每次 NVIDIA 请求至少间隔约 1.55 秒，以避免超过
+40 RPM。多个同时运行的生成任务也共享此限制；服务重启后限速状态重新计时。
+
+NVIDIA Flux 生图会根据视频方向请求对应尺寸：横屏为 `1536x864`（16:9），竖屏为
+`864x1536`（9:16）；连接测试仍使用 `1024x1024` 小图。最终视频还会按所选输出分辨率编码。
+
 选择 NVIDIA 预设后，页面会自动启用“AI 画面生成”并选择 FLUX.2 klein 4B。图像 Key
 和图像 Base URL 可以留空，后端会沿用 LLM 的 `nvapi-...` Key，并自动请求 NVIDIA 的
 专用图像端点。完整链路为：OCR → NVIDIA/其他 LLM 生成场景提示词 → NVIDIA Flux 生图

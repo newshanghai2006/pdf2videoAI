@@ -10,6 +10,7 @@ import os
 import time
 import base64
 import urllib.request
+import urllib.error
 import json
 from openai import OpenAI
 from PIL import Image
@@ -69,6 +70,14 @@ def _nvidia_generate(prompt, output_path, api_key, model, width=1024, height=102
         _flatten_to_rgb(raw, output_path)
         _safe_remove_file(raw)
         return output_path
+    except urllib.error.HTTPError as error:
+        try:
+            detail = error.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(error)
+        raise RuntimeError(
+            f"NVIDIA 图像模型 '{model}' 调用失败: HTTP {error.code}: {detail}"
+        ) from error
     except Exception as error:
         raise RuntimeError(f"NVIDIA 图像模型 '{model}' 调用失败: {error}") from error
 
@@ -149,9 +158,9 @@ def generate_scene_image(prompt, output_path, orientation="landscape",
     model = image_model or IMAGE_MODEL
     if _is_nvidia(base_url, api_key):
         if orientation == "portrait":
-            nvidia_width, nvidia_height = 864, 1536
+            nvidia_width, nvidia_height = 1024, 1024
         else:
-            nvidia_width, nvidia_height = 1536, 864
+            nvidia_width, nvidia_height = 1024, 1024
         return _nvidia_generate(prompt, output_path, api_key, model,
                                  width=nvidia_width, height=nvidia_height)
     model_l = model.lower()

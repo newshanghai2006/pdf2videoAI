@@ -175,6 +175,20 @@ async function loadConfig() {
         document.getElementById('imageModelPreset').addEventListener('change', (e) => {
             if (e.target.value) document.getElementById('imageModel').value = e.target.value;
         });
+        document.getElementById('providerPreset').addEventListener('change', (e) => {
+            if (e.target.value !== 'nvidia') return;
+            document.getElementById('llmBaseUrl').value = 'https://integrate.api.nvidia.com/v1';
+            const llmPreset = document.getElementById('llmModelPreset');
+            const imagePreset = document.getElementById('imageModelPreset');
+            llmPreset.innerHTML = '<option value="">选择 NVIDIA LLM 模型或手动输入</option>';
+            imagePreset.innerHTML = '<option value="">选择 NVIDIA 图像模型或手动输入</option>';
+            for (const [key, desc] of Object.entries(data.nvidia_llm_models || {})) {
+                const option = document.createElement('option'); option.value = key; option.textContent = `${key} - ${desc}`; llmPreset.appendChild(option);
+            }
+            for (const [key, desc] of Object.entries(data.nvidia_image_models || {})) {
+                const option = document.createElement('option'); option.value = key; option.textContent = `${key} - ${desc}`; imagePreset.appendChild(option);
+            }
+        });
     } catch (e) {
         console.error('加载配置失败:', e);
     }

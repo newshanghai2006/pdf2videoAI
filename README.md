@@ -140,6 +140,18 @@ python app.py
 
 ### OpenAI 兼容网关配置
 
+界面的“服务商预设”选择 NVIDIA 后，会自动填入 NVIDIA LLM 地址，并切换到 NVIDIA
+模型下拉菜单：
+
+```text
+LLM Base URL: https://integrate.api.nvidia.com/v1
+LLM API Key:  nvapi-...
+```
+
+NVIDIA 文本模型通过 OpenAI 兼容 Chat Completions 使用。NVIDIA 图像模型使用独立的
+NIM 图像端点适配；当前预设为 Stable Diffusion XL。免费额度、模型可用性和请求参数
+以 NVIDIA API Catalog 当前页面为准。
+
 程序支持服务商提供的自定义 API 根路径，例如：
 
 ```text

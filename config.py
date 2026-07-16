@@ -120,6 +120,18 @@ IMAGE_MODELS = {
     "sd-xl": "Stable Diffusion XL",
 }
 
+NVIDIA_LLM_MODELS = {
+    "meta/llama-3.1-70b-instruct": "Llama 3.1 70B Instruct",
+    "meta/llama-3.1-8b-instruct": "Llama 3.1 8B Instruct",
+    "mistralai/mixtral-8x7b-instruct-v0.1": "Mixtral 8x7B Instruct",
+    "mistralai/mistral-nemo-minitron-8b-8k-instruct": "Mistral NeMo Minitron",
+    "qwen/qwen2.5-coder-32b-instruct": "Qwen 2.5 Coder 32B",
+}
+
+NVIDIA_IMAGE_MODELS = {
+    "stabilityai/stable-diffusion-xl": "Stable Diffusion XL (NVIDIA NIM)",
+}
+
 # 艺术风格预设
 ART_STYLES = {
     "chinese_ink": "中国传统水墨彩绘风格，色彩鲜明，笔触流畅，具有东方美学",

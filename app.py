@@ -21,6 +21,7 @@ from config import (
     DEFAULT_NARRATION_VOICE, DEFAULT_DIALOGUE_VOICE,
     IMAGE_API_KEY, IMAGE_BASE_URL,
     SETTINGS_FILE,
+    NVIDIA_LLM_MODELS, NVIDIA_IMAGE_MODELS,
 )
 
 app = Flask(__name__)
@@ -370,6 +371,8 @@ def get_config():
         'tts_voices': TTS_VOICES,
         'llm_models': LLM_MODELS,
         'image_models': IMAGE_MODELS,
+        'nvidia_llm_models': NVIDIA_LLM_MODELS,
+        'nvidia_image_models': NVIDIA_IMAGE_MODELS,
         'default_llm_model': LLM_MODEL,
         'default_image_model': IMAGE_MODEL,
         'video_engines': VIDEO_ENGINES,

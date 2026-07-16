@@ -69,6 +69,13 @@
                         </div>
                         <p class="hint-text">本机配置会保存到 user_settings.json，下次打开自动填充。请勿在共享电脑或公网部署中使用。</p>
                         <div class="form-group">
+                            <label>服务商预设</label>
+                            <select id="providerPreset" class="input">
+                                <option value="">自定义 / OpenAI 兼容服务</option>
+                                <option value="nvidia">NVIDIA NIM（免费额度）</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
                             <label>LLM API Key <span class="required">*</span></label>
                             <input type="password" id="llmApiKey" class="input"
                                    placeholder="sk-..." autocomplete="off">

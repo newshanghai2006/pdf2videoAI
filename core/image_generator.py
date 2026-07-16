@@ -10,6 +10,7 @@ import os
 import time
 import base64
 import urllib.request
+import json
 from openai import OpenAI
 from PIL import Image
 
@@ -31,6 +32,35 @@ def _download(url, output_path):
     with urllib.request.urlopen(req, timeout=60) as resp:
         with open(output_path, 'wb') as f:
             f.write(resp.read())
+
+
+def _is_nvidia(base_url, api_key):
+    return ("nvidia" in (base_url or "").lower()) or (api_key or "").startswith("nvapi-")
+
+
+def _nvidia_generate(prompt, output_path, api_key, model):
+    """NVIDIA NIM 图像生成（SDXL 风格端点，返回 artifacts[].base64）。"""
+    endpoint = f"https://ai.api.nvidia.com/v1/genai/{model}"
+    payload = {"text_prompts": [{"text": prompt, "weight": 1}], "cfg_scale": 5,
+               "sampler": "K_EULER_ANCESTRAL", "seed": 0, "steps": 25}
+    request = urllib.request.Request(
+        endpoint, data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json",
+                 "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        encoded = data.get("artifacts", [{}])[0].get("base64")
+        if not encoded:
+            raise RuntimeError(f"NVIDIA 图像接口未返回 artifacts.base64: {data}")
+        raw = output_path + ".raw"
+        with open(raw, "wb") as handle:
+            handle.write(base64.b64decode(encoded))
+        _flatten_to_rgb(raw, output_path)
+        _safe_remove_file(raw)
+        return output_path
+    except Exception as error:
+        raise RuntimeError(f"NVIDIA 图像模型 '{model}' 调用失败: {error}") from error
 
 
 def _flatten_to_rgb(src_path, dst_path):
@@ -107,6 +137,8 @@ def generate_scene_image(prompt, output_path, orientation="landscape",
     """
     client = get_client(api_key, base_url)
     model = image_model or IMAGE_MODEL
+    if _is_nvidia(base_url, api_key):
+        return _nvidia_generate(prompt, output_path, api_key, model)
     model_l = model.lower()
 
     sizes = _choose_sizes(model, orientation)
@@ -152,6 +184,15 @@ def test_image_model(api_key=None, base_url=None, image_model=None):
     """
     client = get_client(api_key, base_url)
     model = image_model or IMAGE_MODEL
+    if _is_nvidia(base_url, api_key):
+        import tempfile
+        test_path = os.path.join(tempfile.gettempdir(), "nvidia_image_test.png")
+        try:
+            _nvidia_generate("A simple red circle on a white background, test pattern.",
+                             test_path, api_key, model)
+            return {"model": model, "response_type": "base64", "supported": True}
+        finally:
+            _safe_remove_file(test_path)
     model_l = model.lower()
     is_dalle = "dall-e" in model_l
 

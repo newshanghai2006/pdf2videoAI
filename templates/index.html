@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 影片生成系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app">
+        <!-- 顶栏 -->
+        <header class="header">
+            <h1 class="logo">AI Film Studio</h1>
+            <p class="subtitle">PDF 连环画 → AI 理解 → AI 重塑画面 → 彩色影片</p>
+        </header>
+
+        <!-- 步骤导航 -->
+        <nav class="steps-nav">
+            <div class="step-item active" data-step="1">
+                <span class="step-num">1</span>
+                <span class="step-label">上传PDF</span>
+            </div>
+            <div class="step-item" data-step="2">
+                <span class="step-num">2</span>
+                <span class="step-label">配置参数</span>
+            </div>
+            <div class="step-item" data-step="3">
+                <span class="step-num">3</span>
+                <span class="step-label">生成影片</span>
+            </div>
+            <div class="step-item" data-step="4">
+                <span class="step-num">4</span>
+                <span class="step-label">预览下载</span>
+            </div>
+        </nav>
+
+        <main class="main">
+            <!-- ===== 步骤1: 上传 ===== -->
+            <section id="step1" class="step-panel active">
+                <div class="upload-zone" id="uploadZone">
+                    <div class="upload-icon">📄</div>
+                    <h2>拖拽 PDF 到此处</h2>
+                    <p>或点击选择文件</p>
+                    <input type="file" id="fileInput" accept=".pdf" hidden>
+                </div>
+                <div class="upload-info" id="uploadInfo" style="display:none;">
+                    <div class="file-card">
+                        <span class="file-icon">📄</span>
+                        <div class="file-details">
+                            <p class="file-name" id="fileName"></p>
+                            <p class="file-meta" id="fileMeta"></p>
+                        </div>
+                        <button class="btn-icon" id="btnReupload" title="重新上传">↻</button>
+                    </div>
+                </div>
+                <div class="step-actions">
+                    <button class="btn btn-primary" id="btnStep1Next" disabled>下一步 →</button>
+                </div>
+            </section>
+
+            <!-- ===== 步骤2: 配置 ===== -->
+            <section id="step2" class="step-panel">
+                <div class="config-grid">
+                    <!-- API 配置 -->
+                    <div class="config-section">
+                        <h3>🔑 AI 配置</h3>
+                        <div class="form-group">
+                            <label><input type="checkbox" id="useAiAnalysis" checked> 启用 AI 剧情分析 <span class="hint">(关闭后使用手动分段)</span></label>
+                        </div>
+                        <p class="hint-text">本机配置会保存到 user_settings.json，下次打开自动填充。请勿在共享电脑或公网部署中使用。</p>
+                        <div class="form-group">
+                            <label>LLM API Key <span class="required">*</span></label>
+                            <input type="password" id="llmApiKey" class="input"
+                                   placeholder="sk-..." autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>LLM Base URL <span class="hint">(OpenAI/Kimi/兼容网关)</span></label>
+                            <input type="text" id="llmBaseUrl" class="input"
+                                   placeholder="https://api.openai.com/v1">
+                        </div>
+                        <div class="form-row">
+                        <div class="form-group">
+                            <label>LLM 模型 <span class="hint">(剧情理解)</span></label>
+                                <select id="llmModelPreset" class="input model-preset">
+                                    <option value="">选择常用模型或手动输入</option>
+                                </select>
+                                <input type="text" id="llmModel" class="input"
+                                       placeholder="gpt-5.5">
+                                <datalist id="llmModelList"></datalist>
+                            </div>
+                            <div class="form-group">
+                                <label>图像模型 <span class="hint">(画面生成；Claude 没有官方图像生成模型)</span></label>
+                                <select id="imageModelPreset" class="input model-preset">
+                                    <option value="">选择常用模型或手动输入</option>
+                                </select>
+                                <input type="text" id="imageModel" class="input"
+                                       placeholder="gpt-image-1">
+                                <datalist id="imageModelList"></datalist>
+                                <p class="hint-text">Anthropic Claude 只能理解图片，不能直接生成图片；只有你的代理额外提供图像接口时，才填写代理文档中的模型名。</p>
+                            </div>
+                        </div>
+                        <div id="manualConfig" style="display:none;">
+                            <div class="form-row">
+                                <div class="form-group"><label>每段包含页数</label><input type="number" id="pagesPerSegment" class="input" value="1" min="1"></div>
+                                <div class="form-group"><label>统一时长（秒）</label><input type="number" id="manualDuration" class="input" value="5" min="1" step="0.5"></div>
+                            </div>
+                            <div class="form-group"><label>各段时长（可选，逗号分隔）</label><input type="text" id="manualDurations" class="input" placeholder="例如：5,8,6"></div>
+                            <div class="form-group"><label>各段伴读文字（每行一段，留空使用 OCR）</label><textarea id="manualNarration" class="input" rows="4" placeholder="每行对应一个视频段落"></textarea></div>
+                            <div class="form-group"><label>导入 SRT 伴读文字</label><input type="file" id="srtInput" accept=".srt"></div>
+                        </div>
+                        <div class="form-group">
+                            <label>图像 API Key <span class="hint">(可与 LLM 不同)</span></label>
+                            <input type="password" id="imageApiKey" class="input"
+                                   placeholder="留空则使用 LLM Key" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>图像 Base URL <span class="hint">(可与 LLM 不同)</span></label>
+                            <input type="text" id="imageBaseUrl" class="input"
+                                   placeholder="留空则使用 LLM Base URL">
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="useImageGeneration">
+                                启用 AI 画面生成 <span class="hint">(关闭时使用 PDF 原页面，无需图像 Key)</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="colorizePages">
+                                美化为彩色图片 <span class="hint">(保留原线稿，需支持图片编辑的图像模型)</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <button class="btn btn-outline" id="btnTestConn" type="button">
+                                🔌 连接测试（验证 Key 与模型是否可用）
+                            </button>
+                            <div class="test-result" id="testResult" style="display:none;"></div>
+                        </div>
+                    </div>
+
+                    <!-- 画面配置 -->
+                    <div class="config-section">
+                        <h3>🎨 画面配置</h3>
+                        <div class="form-group">
+                            <label>视频引擎 <span class="hint">(画面动态方式)</span></label>
+                            <select id="videoEngine" class="input"></select>
+                            <p class="hint-text" id="videoEngineHint"></p>
+                        </div>
+                        <div class="form-group" id="seedanceConfig" style="display:none;">
+                            <label>火山 Seedance API Key <span class="hint">(选 Seedance 引擎时填)</span></label>
+                            <input type="password" id="seedanceKey" class="input"
+                                   placeholder="火山 ARK / 视觉智能 Key" autocomplete="off">
+                            <input type="text" id="seedanceBaseUrl" class="input"
+                                   placeholder="视频服务 Base URL（可选）">
+                            <input type="text" id="seedanceModel" class="input"
+                                   placeholder="视频模型（可选，如 seedance）">
+                        </div>
+                        <div class="form-group">
+                            <label>艺术风格</label>
+                            <select id="artStyle" class="input"></select>
+                        </div>
+                        <div class="form-group">
+                            <label title="勾选后会额外产出一份中英双语视频提示词，可复制粘贴到火山 Seedance / 即梦 / 可灵 / Runway 等网页版工具，无需 API">
+                                <input type="checkbox" id="exportPrompts">
+                                生成AI视频提示词 <span class="hint">(可复制粘贴到火山/即梦等网页工具)</span>
+                            </label>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>画面方向</label>
+                                <div class="toggle-group" id="orientationToggle">
+                                    <button class="toggle-btn active" data-value="landscape">🖥️ 横屏</button>
+                                    <button class="toggle-btn" data-value="portrait">📱 竖屏</button>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>分辨率</label>
+                                <select id="resolution" class="input">
+                                    <option value="1080p_land">1080p 横屏 (1920×1080)</option>
+                                    <option value="720p_land">720p 横屏 (1280×720)</option>
+                                    <option value="1080p_port">1080p 竖屏 (1080×1920)</option>
+                                    <option value="720p_port">720p 竖屏 (720×1280)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 页面范围 -->
+                    <div class="config-section">
+                        <h3>📖 页面范围</h3>
+                        <div class="form-group"><label>OCR 文字语言</label><select id="ocrLanguage" class="input"><option value="ch">简体/中文</option><option value="chinese_cht">繁体中文</option><option value="en">英文</option></select></div>
+                        <div class="form-row">
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label>选择页面 <span class="hint">(逗号分隔，支持范围)</span></label>
+                                <input type="text" id="pageSelection" class="input"
+                                       placeholder="例如：1,3,5-10,12-20">
+                            </div>
+                        </div>
+                        <p class="hint-text" id="pageRangeHint"></p>
+                    </div>
+
+                    <!-- 音频配置 -->
+                    <div class="config-section">
+                        <h3>🔊 音频配置</h3>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="useTts" checked>
+                                启用 TTS 旁白配音
+                            </label>
+                        </div>
+                        <div class="form-group" id="ttsConfig">
+                            <label>旁白语音</label>
+                            <select id="ttsVoice" class="input"></select>
+                        </div>
+                        <div class="form-group" id="dialogueVoiceConfig">
+                            <label>对白语音 <span class="hint">(角色台词，用不同声音)</span></label>
+                            <select id="dialogueVoice" class="input"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>背景音乐 <span class="hint">(可选)</span></label>
+                            <div class="bgm-upload">
+                                <input type="file" id="bgmInput" accept="audio/*" hidden>
+                                <button class="btn btn-outline" id="btnUploadBgm">🎵 选择音乐</button>
+                                <span class="bgm-name" id="bgmName">未选择</span>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>背景音乐音量: <span id="bgmVolLabel">15%</span></label>
+                            <input type="range" id="bgmVolume" min="0" max="100" value="15">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="step-actions">
+                    <button class="btn btn-outline" id="btnStep2Prev">← 上一步</button>
+                    <button class="btn btn-primary" id="btnStep2Next">开始生成影片 →</button>
+                </div>
+            </section>
+
+            <!-- ===== 步骤3: 处理进度 ===== -->
+            <section id="step3" class="step-panel">
+                <div class="progress-container">
+                    <h2>正在生成影片...</h2>
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar" id="progressBar">
+                            <div class="progress-fill" id="progressFill" style="width:0%"></div>
+                        </div>
+                        <span class="progress-text" id="progressText">0%</span>
+                    </div>
+                    <p class="progress-message" id="progressMessage">准备中...</p>
+
+                    <!-- 阶段指示器 -->
+                    <div class="phases">
+                        <div class="phase-item" data-phase="extract">
+                            <div class="phase-icon">📄</div>
+                            <div class="phase-info">
+                                <p class="phase-name">提取页面</p>
+                                <p class="phase-desc">PDF转图片</p>
+                            </div>
+                            <div class="phase-status">⏳</div>
+                        </div>
+                        <div class="phase-item" data-phase="ocr">
+                            <div class="phase-icon">🔍</div>
+                            <div class="phase-info">
+                                <p class="phase-name">OCR识别</p>
+                                <p class="phase-desc">提取文字</p>
+                            </div>
+                            <div class="phase-status">⏳</div>
+                        </div>
+                        <div class="phase-item" data-phase="analyze">
+                            <div class="phase-icon">🧠</div>
+                            <div class="phase-info">
+                                <p class="phase-name">AI理解</p>
+                                <p class="phase-desc">剧情分析</p>
+                            </div>
+                            <div class="phase-status">⏳</div>
+                        </div>
+                        <div class="phase-item" data-phase="generate">
+                            <div class="phase-icon">🎨</div>
+                            <div class="phase-info">
+                                <p class="phase-name">AI画面生成</p>
+                                <p class="phase-desc">重塑彩色画面</p>
+                            </div>
+                            <div class="phase-status">⏳</div>
+                        </div>
+                        <div class="phase-item" data-phase="tts">
+                            <div class="phase-icon">🎙️</div>
+                            <div class="phase-info">
+                                <p class="phase-name">配音生成</p>
+                                <p class="phase-desc">TTS旁白</p>
+                            </div>
+                            <div class="phase-status">⏳</div>
+                        </div>
+                        <div class="phase-item" data-phase="build">
+                            <div class="phase-icon">🎬</div>
+                            <div class="phase-info">
+                                <p class="phase-name">影片合成</p>
+                                <p class="phase-desc">运镜+拼接</p>
+                            </div>
+                            <div class="phase-status">⏳</div>
+                        </div>
+                    </div>
+
+                    <!-- AI 生成画面预览 -->
+                    <div class="scene-gallery" id="sceneGallery" style="display:none;">
+                        <h3>AI 生成的画面</h3>
+                        <div class="gallery-grid" id="galleryGrid"></div>
+                    </div>
+
+                    <!-- 错误信息 -->
+                    <div class="error-box" id="errorBox" style="display:none;">
+                        <p class="error-title">❌ 处理失败</p>
+                        <p class="error-msg" id="errorMsg"></p>
+                        <button class="btn btn-outline" id="btnRetry">返回修改</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ===== 步骤4: 预览下载 ===== -->
+            <section id="step4" class="step-panel">
+                <div class="result-container">
+                    <h2>影片生成完成！</h2>
+                    <div class="video-preview">
+                        <video id="videoPreview" controls></video>
+                    </div>
+                    <div class="step-actions">
+                        <button class="btn btn-outline" id="btnStep4Prev">← 重新生成</button>
+                        <a class="btn btn-primary" id="btnDownload" href="#" download>⬇️ 下载影片</a>
+                        <a class="btn btn-outline" id="btnDownloadSubtitles" href="#" download>下载字幕 SRT</a>
+                        <a class="btn btn-outline" id="btnDownloadPrompts" href="#" download
+                           style="display:none;">📝 下载AI视频提示词</a>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- 底部信息 -->
+        <footer class="footer">
+            <p>AI Film Studio · PDF→OCR→AI理解→AI画面→TTS→影片</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

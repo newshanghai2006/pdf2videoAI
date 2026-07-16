@@ -1,0 +1,46 @@
+# ===== 密钥和本机配置（绝对不要提交） =====
+.env
+.env.*
+!.env.example
+user_settings.json
+*.key
+*.pem
+
+# ===== Python 虚拟环境 =====
+.venv/
+venv/
+env/
+
+# ===== Python 缓存和测试产物 =====
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== 应用运行时目录 =====
+uploads/
+outputs/
+test_pages/
+
+# ===== 日志和临时文件 =====
+*.log
+*.tmp
+*.bak
+*.pid
+
+# ===== 本地测试素材和生成媒体 =====
+/10辕门射戟.pdf
+*.mp4
+*.mp3
+*.wav
+*.srt
+
+# ===== 编辑器和操作系统文件 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

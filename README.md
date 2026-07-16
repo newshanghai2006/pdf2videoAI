@@ -149,8 +149,13 @@ LLM API Key:  nvapi-...
 ```
 
 NVIDIA 文本模型通过 OpenAI 兼容 Chat Completions 使用。NVIDIA 图像模型使用独立的
-NIM 图像端点适配；当前预设为 Stable Diffusion XL。免费额度、模型可用性和请求参数
+NIM 图像端点适配；当前预设包含 FLUX.2 klein 4B 和 Stable Diffusion XL。免费额度、模型可用性和请求参数
 以 NVIDIA API Catalog 当前页面为准。
+
+选择 NVIDIA 预设后，页面会自动启用“AI 画面生成”并选择 FLUX.2 klein 4B。图像 Key
+和图像 Base URL 可以留空，后端会沿用 LLM 的 `nvapi-...` Key，并自动请求 NVIDIA 的
+专用图像端点。完整链路为：OCR → NVIDIA/其他 LLM 生成场景提示词 → NVIDIA Flux 生图
+→ TTS → 静态或 Ken Burns 视频合成。
 
 程序支持服务商提供的自定义 API 根路径，例如：
 
@@ -429,6 +434,10 @@ uploads/、outputs/、test_pages/
 ---
 
 ## API 接口
+
+任务状态保存在当前服务进程内存中。服务重启后，正在运行或已完成任务的内存状态会丢失；
+浏览器检测到任务 404 时会自动停止轮询，并提示返回配置页面重新生成。`outputs/` 中已生成的
+文件不会因重启而删除，但旧任务不能再通过原 task_id 下载。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|

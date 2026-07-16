@@ -39,10 +39,14 @@ def _is_nvidia(base_url, api_key):
 
 
 def _nvidia_generate(prompt, output_path, api_key, model):
-    """NVIDIA NIM 图像生成（SDXL 风格端点，返回 artifacts[].base64）。"""
+    """NVIDIA NIM 图像生成，兼容 Flux 官方示例及 SDXL 返回格式。"""
     endpoint = f"https://ai.api.nvidia.com/v1/genai/{model}"
-    payload = {"text_prompts": [{"text": prompt, "weight": 1}], "cfg_scale": 5,
-               "sampler": "K_EULER_ANCESTRAL", "seed": 0, "steps": 25}
+    payload = {"prompt": prompt, "width": 1024, "height": 1024,
+               "seed": 0, "steps": 4 if "flux" in model.lower() else 25}
+    if "stabilityai" in model.lower():
+        payload = {"text_prompts": [{"text": prompt, "weight": 1}],
+                   "cfg_scale": 5, "sampler": "K_EULER_ANCESTRAL",
+                   "seed": 0, "steps": 25}
     request = urllib.request.Request(
         endpoint, data=json.dumps(payload).encode("utf-8"),
         headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json",
@@ -50,7 +54,11 @@ def _nvidia_generate(prompt, output_path, api_key, model):
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
             data = json.loads(response.read().decode("utf-8"))
-        encoded = data.get("artifacts", [{}])[0].get("base64")
+        encoded = data.get("image")
+        if not encoded and data.get("images"):
+            encoded = data["images"][0].get("image") or data["images"][0].get("base64")
+        if not encoded and data.get("artifacts"):
+            encoded = data["artifacts"][0].get("base64")
         if not encoded:
             raise RuntimeError(f"NVIDIA 图像接口未返回 artifacts.base64: {data}")
         raw = output_path + ".raw"

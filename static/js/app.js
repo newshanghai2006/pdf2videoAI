@@ -188,6 +188,22 @@ async function loadConfig() {
             for (const [key, desc] of Object.entries(data.nvidia_image_models || {})) {
                 const option = document.createElement('option'); option.value = key; option.textContent = `${key} - ${desc}`; imagePreset.appendChild(option);
             }
+            const firstLlm = Object.keys(data.nvidia_llm_models || {})[0] || '';
+            const preferredImage = 'black-forest-labs/flux.2-klein-4b';
+            if (firstLlm) {
+                llmPreset.value = firstLlm;
+                document.getElementById('llmModel').value = firstLlm;
+            }
+            if ((data.nvidia_image_models || {})[preferredImage]) {
+                imagePreset.value = preferredImage;
+                document.getElementById('imageModel').value = preferredImage;
+            }
+            // 图像 Key/Base URL 留空时，后端自动沿用 NVIDIA LLM Key；
+            // NVIDIA 图像生成使用 ai.api.nvidia.com 的专用 NIM 端点。
+            document.getElementById('imageApiKey').value = '';
+            document.getElementById('imageBaseUrl').value = '';
+            document.getElementById('useImageGeneration').checked = true;
+            document.getElementById('colorizePages').checked = false;
         });
     } catch (e) {
         console.error('加载配置失败:', e);
@@ -599,6 +615,17 @@ async function pollProgress() {
     try {
         const res = await fetch(`/api/progress/${state.taskId}`);
         const data = await res.json();
+
+        if (res.status === 404) {
+            if (state.pollTimer) clearInterval(state.pollTimer);
+            state.pollTimer = null;
+            state.taskId = null;
+            showError('任务不存在或服务已重启。请返回配置页面重新开始生成。');
+            return;
+        }
+        if (!res.ok) {
+            throw new Error(data.error || `查询任务失败（HTTP ${res.status}）`);
+        }
 
         // 更新进度条
         document.getElementById('progressFill').style.width = data.progress + '%';

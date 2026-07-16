@@ -129,6 +129,7 @@ NVIDIA_LLM_MODELS = {
 }
 
 NVIDIA_IMAGE_MODELS = {
+    "black-forest-labs/flux.2-klein-4b": "FLUX.2 klein 4B (NVIDIA NIM)",
     "stabilityai/stable-diffusion-xl": "Stable Diffusion XL (NVIDIA NIM)",
 }
 

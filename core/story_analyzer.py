@@ -117,6 +117,35 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
             'scenes': list[dict],
         }
     """
+    # 大文档一次返回全部场景容易超过输出 token 上限并产生残缺 JSON。
+    # 分批分析后合并，既控制输入上下文，也控制每次结构化输出长度。
+    batch_size = 8
+    if len(ocr_results) > batch_size:
+        batches = [ocr_results[i:i + batch_size]
+                   for i in range(0, len(ocr_results), batch_size)]
+        merged = {'title': '', 'summary': '', 'characters': [], 'scenes': []}
+        summaries = []
+        for batch_index, batch in enumerate(batches):
+            if progress_callback:
+                progress_callback(batch_index, len(batches),
+                                  f"AI 分批分析 {batch_index + 1}/{len(batches)}")
+            part = analyze_story(batch, art_style=art_style, api_key=api_key,
+                                 base_url=base_url, llm_model=llm_model)
+            if not merged['title']:
+                merged['title'] = part.get('title', '')
+            if part.get('summary'):
+                summaries.append(part['summary'])
+            for character in part.get('characters', []):
+                if character not in merged['characters']:
+                    merged['characters'].append(character)
+            merged['scenes'].extend(part.get('scenes', []))
+        for index, scene in enumerate(merged['scenes'], 1):
+            scene['scene_number'] = index
+        merged['summary'] = ' '.join(summaries)
+        if progress_callback:
+            progress_callback(len(batches), len(batches), "AI 分批分析完成")
+        return merged
+
     if progress_callback:
         progress_callback(0, 1, "准备AI分析...")
 
@@ -204,7 +233,13 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
     # 去掉可能的 markdown 代码块标记
     if content.startswith('```'):
         content = content.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
-    result = json.loads(content)
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"LLM 返回的场景 JSON 不完整或格式错误（位置 {error.pos}: {error.msg}）。"
+            "请减少单次页面数量、改用输出能力更强的模型，或重试当前批次。"
+        ) from error
 
     return result
 

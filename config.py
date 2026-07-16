@@ -126,9 +126,12 @@ NVIDIA_LLM_MODELS = {
     "mistralai/mixtral-8x7b-instruct-v0.1": "Mixtral 8x7B Instruct",
     "mistralai/mistral-nemo-minitron-8b-8k-instruct": "Mistral NeMo Minitron",
     "qwen/qwen2.5-coder-32b-instruct": "Qwen 2.5 Coder 32B",
+    "z-ai/glm-5.2": "z-ai/glm-5.2",
 }
 
 NVIDIA_IMAGE_MODELS = {
+    "black-forest-labs/flux.1-dev": "black-forest-labs/flux.1-dev (NVIDIA NIM)",
+    "black-forest-labs/flux.1-schnell": "black-forest-labs/flux.1-schnell (NVIDIA NIM)",
     "black-forest-labs/flux.2-klein-4b": "FLUX.2 klein 4B (NVIDIA NIM)",
     "stabilityai/stable-diffusion-xl": "Stable Diffusion XL (NVIDIA NIM)",
 }

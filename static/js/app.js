@@ -22,7 +22,22 @@ document.addEventListener('DOMContentLoaded', () => {
     setupBgmUpload();
     setupProcessButton();
     setupTestButton();
+    document.getElementById('btnContinueWithoutAi').addEventListener('click', () => submitDecision('continue'));
+    document.getElementById('btnAbortTask').addEventListener('click', () => submitDecision('abort'));
 });
+
+async function submitDecision(decision) {
+    if (!state.taskId) return;
+    const res = await fetch(`/api/decision/${state.taskId}`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({decision}),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || '提交选择失败'); return; }
+    document.getElementById('decisionBox').style.display = 'none';
+    document.getElementById('progressMessage').textContent =
+        decision === 'continue' ? '正在以无 AI 模式继续...' : '正在退出任务...';
+}
 
 const savedSettingFields = [
     'llmApiKey', 'llmBaseUrl', 'llmModel',
@@ -645,7 +660,12 @@ async function pollProgress() {
         }
 
         // 检查完成/错误
-        if (data.status === 'completed') {
+        if (data.status === 'waiting_user') {
+            const box = document.getElementById('decisionBox');
+            box.style.display = 'block';
+            document.getElementById('decisionTitle').textContent = `${data.decision_stage || 'AI 处理'}失败`;
+            document.getElementById('decisionMsg').textContent = data.error || data.message;
+        } else if (data.status === 'completed') {
             clearInterval(state.pollTimer);
             state.pollTimer = null;
             setTimeout(() => showResult(state.taskId), 500);
@@ -739,6 +759,7 @@ function resetProgress() {
     document.getElementById('progressText').textContent = '0%';
     document.getElementById('progressMessage').textContent = '准备中...';
     document.getElementById('errorBox').style.display = 'none';
+    document.getElementById('decisionBox').style.display = 'none';
     document.getElementById('sceneGallery').style.display = 'none';
     document.getElementById('galleryGrid').innerHTML = '';
     document.querySelector('.progress-container > h2').textContent = '正在生成影片...';

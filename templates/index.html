@@ -255,6 +255,12 @@
                         <span class="progress-text" id="progressText">0%</span>
                     </div>
                     <p class="progress-message" id="progressMessage">准备中...</p>
+                    <div class="error-box" id="decisionBox" style="display:none;">
+                        <p class="error-title" id="decisionTitle">AI 处理失败</p>
+                        <p class="error-msg" id="decisionMsg"></p>
+                        <button class="btn btn-primary" id="btnContinueWithoutAi">无 AI 继续</button>
+                        <button class="btn btn-outline" id="btnAbortTask">退出任务</button>
+                    </div>
 
                     <!-- 阶段指示器 -->
                     <div class="phases">

@@ -90,6 +90,8 @@ def create_task():
             'prompts_path': None,
             'subtitle_path': None,
             'error': None,
+            'decision': None,
+            'decision_event': threading.Event(),
             'created_at': time.time(),
         }
     return task_id
@@ -106,6 +108,24 @@ def get_task(task_id):
     """获取任务状态"""
     with _tasks_lock:
         return _tasks.get(task_id, {}).copy()
+
+
+def wait_for_decision(task_id, stage, error, timeout=3600):
+    """暂停后台任务，等待前端选择 continue 或 abort。"""
+    with _tasks_lock:
+        task = _tasks[task_id]
+        event = task['decision_event']
+        event.clear()
+        task.update(status='waiting_user', decision=None, decision_stage=stage,
+                    error=str(error), message=f'{stage}失败，请选择继续或退出')
+    if not event.wait(timeout):
+        raise RuntimeError(f'{stage}失败且等待用户决定超时: {error}')
+    with _tasks_lock:
+        decision = _tasks[task_id].get('decision')
+        _tasks[task_id]['status'] = 'running'
+        _tasks[task_id]['error'] = None
+    if decision != 'continue':
+        raise RuntimeError(f'用户已终止任务（{stage}失败: {error}）')
 
 
 def _manual_scenes(ocr_results, pages_per_segment=1, duration=5.0,
@@ -210,10 +230,16 @@ def run_pipeline(task_id, pdf_path, config):
         update_task(task_id, phase='analyze', progress=28,
                     message='AI正在理解剧情和台词...' if use_ai_analysis else '正在按手动参数组织场景...')
         if use_ai_analysis:
-            story = analyze_story(ocr_results, art_style=art_style, api_key=api_key,
-                                  base_url=base_url, llm_model=llm_model or None,
-                                  progress_callback=lambda c, t, m: update_task(
-                                      task_id, progress=28 + int(c / (t or 1) * 7), message=m))
+            try:
+                story = analyze_story(ocr_results, art_style=art_style, api_key=api_key,
+                                      base_url=base_url, llm_model=llm_model or None,
+                                      progress_callback=lambda c, t, m: update_task(
+                                          task_id, progress=28 + int(c / (t or 1) * 7), message=m))
+            except Exception as error:
+                wait_for_decision(task_id, 'AI 理解', error)
+                story = {'title': 'AI 分析降级', 'scenes': _manual_scenes(
+                    ocr_results, config.get('pages_per_segment', 1),
+                    config.get('manual_duration', 5))}
         else:
             lines = config.get('manual_narration', '').splitlines()
             durations = [x.strip() for x in config.get('manual_durations', '').split(',') if x.strip()]
@@ -247,6 +273,11 @@ def run_pipeline(task_id, pdf_path, config):
         # ===== 阶段4: AI 画面生成（可选；关闭时直接使用 PDF 原页面） =====
         update_task(task_id, phase='generate', progress=38,
                     message='正在准备视频画面...')
+        for scene_index, scene in enumerate(scenes):
+            source_index = int(scene.get('page_source') or 0) - 1
+            if source_index < 0 or source_index >= len(page_images):
+                source_index = scene_index % len(page_images)
+            scene['source_image_path'] = page_images[source_index]
         if colorize_pages_enabled:
             color_dir = os.path.join(work_dir, 'color_pages')
             colored_pages = colorize_pages(
@@ -259,14 +290,20 @@ def run_pipeline(task_id, pdf_path, config):
             page_images = colored_pages
         elif use_image_generation:
             scenes_dir = os.path.join(work_dir, 'scenes')
-            scenes = generate_all_scenes(
-                scenes, scenes_dir, orientation=orientation,
-                api_key=image_api_key, base_url=image_base_url,
-                image_model=image_model or None,
-                progress_callback=lambda c, t, m, img: update_task(
-                    task_id, progress=38 + int(c / (t or 1) * 35),
-                    message=m, scenes=scenes)
-            )
+            try:
+                scenes = generate_all_scenes(
+                    scenes, scenes_dir, orientation=orientation,
+                    api_key=image_api_key, base_url=image_base_url,
+                    image_model=image_model or None,
+                    progress_callback=lambda c, t, m, img: update_task(
+                        task_id, progress=38 + int(c / (t or 1) * 35),
+                        message=m, scenes=scenes)
+                )
+            except Exception as error:
+                wait_for_decision(task_id, 'AI 生图', error)
+                for scene in scenes:
+                    scene['image_path'] = scene.get('image_path') or scene.get('source_image_path')
+                update_task(task_id, message='AI 生图已降级，未完成场景使用 PDF 原页面')
         else:
             page_by_num = {
                 int(os.path.basename(path).split('_')[-1].split('.')[0]): path
@@ -543,7 +580,24 @@ def get_progress(task_id):
         'scenes': task.get('scenes', []),
         'has_prompts': bool(task.get('prompts_path')),
         'has_subtitles': bool(task.get('subtitle_path')),
+        'decision_stage': task.get('decision_stage'),
     })
+
+
+@app.route('/api/decision/<task_id>', methods=['POST'])
+def task_decision(task_id):
+    decision = (request.json or {}).get('decision')
+    if decision not in ('continue', 'abort'):
+        return jsonify({'error': 'decision 必须是 continue 或 abort'}), 400
+    with _tasks_lock:
+        task = _tasks.get(task_id)
+        if not task:
+            return jsonify({'error': '任务不存在'}), 404
+        if task.get('status') != 'waiting_user':
+            return jsonify({'error': '任务当前不需要用户决定'}), 409
+        task['decision'] = decision
+        task['decision_event'].set()
+    return jsonify({'ok': True})
 
 
 @app.route('/api/scene_image/<task_id>/<int:scene_idx>')

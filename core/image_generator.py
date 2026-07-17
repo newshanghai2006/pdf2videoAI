@@ -12,6 +12,7 @@ import base64
 import urllib.request
 import urllib.error
 import json
+import re
 from openai import OpenAI
 from PIL import Image
 
@@ -38,6 +39,29 @@ def _download(url, output_path):
 
 def _is_nvidia(base_url, api_key):
     return ("nvidia" in (base_url or "").lower()) or (api_key or "").startswith("nvapi-")
+
+
+def _safe_historical_prompt(prompt):
+    """将可能触发过滤的战争描述改写为非血腥、适合全年龄的历史场景。"""
+    replacements = {
+        r"\b(blood|bloody|gore|gory)\b": "",
+        r"\b(kill(?:ed|ing)?|murder(?:ed|ing)?)\b": "defeated",
+        r"\b(dead|death|corpse|bodies)\b": "fallen banners",
+        r"\b(wound(?:ed|s|ing)?|injur(?:y|ed|ies))\b": "exhausted",
+        r"\b(behead(?:ed|ing)?|decapitat(?:ed|ion|ing))\b": "captured",
+        r"\b(stab(?:bed|bing)?|slash(?:ed|ing)?)\b": "confronting",
+        r"\b(weapon|sword|spear|arrow|gun)\b": "historical ceremonial equipment",
+    }
+    safe = prompt
+    for pattern, value in replacements.items():
+        safe = re.sub(pattern, value, safe, flags=re.IGNORECASE)
+    safe = re.sub(r"\s+", " ", safe).strip()
+    return (
+        safe[:1800]
+        + " Family-friendly historical illustration, non-graphic, no blood, "
+          "no visible injury, no dead bodies, no explicit violence. Preserve the era, "
+          "characters, location, composition and dramatic storytelling atmosphere."
+    )
 
 
 def _nvidia_generate(prompt, output_path, api_key, model, width=1024, height=1024):
@@ -289,6 +313,7 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
 
         # 重试机制
         max_retries = 3
+        content_filter_rewritten = False
         for attempt in range(max_retries):
             try:
                 generate_scene_image(
@@ -299,13 +324,34 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
                 scene['image_path'] = out_path
                 break
             except Exception as e:
+                if "CONTENT_FILTERED" in str(e).upper():
+                    if not content_filter_rewritten:
+                        content_filter_rewritten = True
+                        prompt = _safe_historical_prompt(prompt)
+                        scene['image_prompt_safe'] = prompt
+                        if progress_callback:
+                            progress_callback(i, total,
+                                              f"场景 {i + 1} 被过滤，改写为安全提示词后重试",
+                                              None)
+                        continue
+                    fallback = scene.get('source_image_path')
+                    if fallback and os.path.exists(fallback):
+                        scene['image_path'] = fallback
+                        scene['image_generation_warning'] = '安全提示词仍被 NVIDIA 过滤，已使用 PDF 原页面'
+                        if progress_callback:
+                            progress_callback(i + 1, total,
+                                              f"场景 {i + 1} 被内容过滤，使用 PDF 原页面",
+                                              fallback)
+                        break
+                    raise RuntimeError(f"场景 {i + 1} 被 NVIDIA 内容过滤，且没有原页面可降级") from e
                 if attempt < max_retries - 1:
                     time.sleep(3)
                 else:
                     raise RuntimeError(f"场景 {i + 1} 画面生成失败: {e}")
 
-        if progress_callback:
-            progress_callback(i + 1, total, f"画面生成完成 {i + 1}/{total}", out_path)
+        if progress_callback and not scene.get('image_generation_warning'):
+            progress_callback(i + 1, total, f"画面生成完成 {i + 1}/{total}",
+                              scene.get('image_path'))
 
     return scenes
 

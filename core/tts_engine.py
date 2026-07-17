@@ -134,17 +134,14 @@ def generate_scene_narrations(scenes, output_dir,
     dialogue_voice = dialogue_voice or DEFAULT_DIALOGUE_VOICE
     total = len(scenes)
     os.makedirs(output_dir, exist_ok=True)
-    tts_available = True
+    success_count = 0
+    failure_count = 0
 
     for i, scene in enumerate(scenes):
         scene_out = os.path.join(output_dir, f"narration_{i + 1:04d}.mp3")
 
         if progress_callback:
             progress_callback(i, total, f"生成配音 {i + 1}/{total}")
-
-        if not tts_available:
-            scene["audio_path"] = None
-            continue
 
         # 组装分段：旁白（narration 声音）+ 各条台词（对白声音，去掉角色名）
         seg_specs = []
@@ -167,13 +164,20 @@ def generate_scene_narrations(scenes, output_dir,
         for j, (kind, txt) in enumerate(seg_specs):
             v = voice if kind == "narration" else dialogue_voice
             part = os.path.join(output_dir, f"n{i + 1:04d}_{j:02d}.mp3")
-            res = _synth(txt, part, v, rate)
+            res = None
+            for attempt in range(3):
+                res = _synth(txt, part, v, rate)
+                if res:
+                    break
+                if attempt < 2:
+                    import time
+                    time.sleep(1.5)
             if res:
                 any_ok = True
                 part_paths.append(res)
             else:
                 # 第一段就失败通常意味着 TTS 服务不可达 → 整体降级
-                tts_available = False
+                failure_count += 1
                 break
 
         if not any_ok:
@@ -184,11 +188,15 @@ def generate_scene_narrations(scenes, output_dir,
 
         merged = _concat_audio(part_paths, scene_out)
         scene["audio_path"] = merged
-        if progress_callback and tts_available:
+        if merged:
+            success_count += 1
+        else:
+            failure_count += 1
+        if progress_callback and merged:
             progress_callback(i + 1, total, f"配音完成 {i + 1}/{total}")
 
-    if not tts_available and progress_callback:
-        progress_callback(total, total, "TTS不可用（网络限制），影片将无配音")
+    if progress_callback and failure_count:
+        progress_callback(total, total, f"TTS完成：{success_count} 个场景成功，{failure_count} 个场景无配音")
 
     return scenes
 

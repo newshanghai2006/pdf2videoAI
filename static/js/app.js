@@ -49,7 +49,7 @@ async function submitDecision(decision) {
     if (!state.taskId) return;
     const res = await fetch(`/api/decision/${state.taskId}`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({decision}),
+        body: JSON.stringify({decision, prompt: document.getElementById('decisionPrompt').value}),
     });
     const data = await res.json();
     if (!res.ok) { alert(data.error || '提交选择失败'); return; }
@@ -687,6 +687,14 @@ async function pollProgress() {
             box.style.display = 'block';
             document.getElementById('decisionTitle').textContent = `${data.decision_stage || 'AI 处理'}失败`;
             document.getElementById('decisionMsg').textContent = data.error || data.message;
+            const promptBox = document.getElementById('decisionPrompt');
+            const promptMode = (data.decision_stage || '').includes('提示词');
+            promptBox.style.display = promptMode ? 'block' : 'none';
+            // 轮询每秒执行一次；用户获得焦点后不能再用服务端旧值覆盖正在编辑的内容。
+            if (document.activeElement !== promptBox) {
+                promptBox.value = data.decision_prompt || '';
+            }
+            document.getElementById('btnContinueWithoutAi').textContent = promptMode ? '修改后重新提交' : '无 AI 继续';
         } else if (data.status === 'completed') {
             clearInterval(state.pollTimer);
             state.pollTimer = null;

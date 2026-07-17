@@ -32,7 +32,12 @@ def _run_ffmpeg(args, timeout=300):
     cmd = [FFMPEG_BIN] + args
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg 失败: {result.stderr[-500:]}")
+        lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        important = [line for line in lines if any(word in line.lower() for word in (
+            'error', 'invalid', 'failed', 'non-monoton', 'timestamp', 'unable', 'could not'
+        ))]
+        detail = " | ".join((important[-8:] or lines[-12:]))
+        raise RuntimeError(f"ffmpeg 失败: {detail[-2500:]}")
 
 
 def _get_audio_duration(audio_path, default=5.0):
@@ -43,9 +48,38 @@ def _get_audio_duration(audio_path, default=5.0):
              "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
             capture_output=True, text=True, timeout=10,
         )
-        return float(result.stdout.strip())
+        value = float(result.stdout.strip())
+        return value if value > 0 else default
     except Exception:
         return default
+
+
+def _valid_audio_path(audio_path):
+    """确认音频存在且包含可解码的音频流。"""
+    if not audio_path or not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1024:
+        return None
+    try:
+        result = subprocess.run(
+            [FFPROBE_BIN, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name,duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if result.returncode != 0 or not values:
+            return None
+        # ffprobe 可能只读到容器元数据；再让 FFmpeg 完整解码到空输出，
+        # 捕获 AAC 包损坏、截断或无效帧。
+        decoded = subprocess.run(
+            [FFMPEG_BIN, "-v", "error", "-xerror", "-err_detect", "explode",
+             "-i", audio_path, "-f", "null", "-"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if decoded.returncode != 0:
+            return None
+        return audio_path
+    except Exception:
+        return None
 
 
 def _scene_duration(scene, use_tts):
@@ -54,8 +88,9 @@ def _scene_duration(scene, use_tts):
     有配音 → 取配音真实时长（不夹取，保证音画一致）；
     无配音 → 取场景建议 duration，兜底 5s。仅做一个宽松下限避免 0 时长。
     """
-    if use_tts and scene.get("audio_path") and os.path.exists(scene["audio_path"]):
-        dur = _get_audio_duration(scene["audio_path"], default=scene.get("duration", 5))
+    valid_audio = _valid_audio_path(scene.get("audio_path")) if use_tts else None
+    if valid_audio:
+        dur = _get_audio_duration(valid_audio, default=scene.get("duration", 5))
     else:
         dur = float(scene.get("duration", 5) or 5)
     return max(1.0, dur)
@@ -69,7 +104,8 @@ def _mux_scene(silent_video, audio_path, out_path, duration):
     - 有配音：视频与音频等长（都等于 duration），直接对齐，无需 -shortest 截断。
     - 无配音：补一条等长静音轨，保证所有片段结构一致（都含音轨），拼接更稳。
     """
-    if audio_path and os.path.exists(audio_path):
+    audio_path = _valid_audio_path(audio_path)
+    if audio_path:
         args = [
             "-y",
             "-i", silent_video,
@@ -77,6 +113,7 @@ def _mux_scene(silent_video, audio_path, out_path, duration):
             "-map", "0:v", "-map", "1:a",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
+            "-ar", "44100", "-ac", "2",
             # 视频与音频均已 ≈duration，用 apad+atrim 把音频精确补/截到 duration，
             # 避免个别编码器的毫秒级尾差造成拼接处对不齐。
             "-af", f"apad,atrim=0:{duration}",
@@ -92,6 +129,7 @@ def _mux_scene(silent_video, audio_path, out_path, duration):
             "-map", "0:v", "-map", "1:a",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
+            "-ar", "44100", "-ac", "2",
             "-t", f"{duration}",
             out_path,
         ]
@@ -116,11 +154,13 @@ def _concat_av_segments(seg_paths, output_path):
             f.write(f"file '{p}'\n")
 
     args = [
-        "-y", "-f", "concat", "-safe", "0", "-i", list_file,
+        "-y", "-fflags", "+genpts", "-f", "concat", "-safe", "0", "-i", list_file,
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-r", str(FPS),
+        "-fps_mode", "cfr", "-avoid_negative_ts", "make_zero",
+        "-max_muxing_queue_size", "1024",
         "-video_track_timescale", "90000",
         output_path,
     ]

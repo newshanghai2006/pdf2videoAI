@@ -285,7 +285,8 @@ def test_image_model(api_key=None, base_url=None, image_model=None):
 
 def generate_all_scenes(scenes, output_dir, orientation="landscape",
                         api_key=None, base_url=None, quality=None,
-                        image_model=None, progress_callback=None):
+                        image_model=None, progress_callback=None,
+                        content_filter_callback=None):
     """为所有场景生成 AI 画面。
 
     Args:
@@ -325,6 +326,13 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
                 break
             except Exception as e:
                 if "CONTENT_FILTERED" in str(e).upper():
+                    if content_filter_callback and not content_filter_rewritten:
+                        revised = content_filter_callback(scene, prompt, str(e))
+                        if revised:
+                            prompt = revised
+                            content_filter_rewritten = True
+                            scene['image_prompt_safe'] = prompt
+                            continue
                     if not content_filter_rewritten:
                         content_filter_rewritten = True
                         prompt = _safe_historical_prompt(prompt)

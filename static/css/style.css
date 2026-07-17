@@ -616,6 +616,16 @@ select.input {
     word-break: break-word;
 }
 
+#decisionPrompt {
+    display: block;
+    min-height: 120px;
+    margin: 12px 0;
+    text-align: left;
+    pointer-events: auto;
+    user-select: text;
+    resize: vertical;
+}
+
 /* ===== 结果区 ===== */
 .result-container {
     text-align: center;

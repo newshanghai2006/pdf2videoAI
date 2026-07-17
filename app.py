@@ -110,22 +110,24 @@ def get_task(task_id):
         return _tasks.get(task_id, {}).copy()
 
 
-def wait_for_decision(task_id, stage, error, timeout=3600):
+def wait_for_decision(task_id, stage, error, prompt='', timeout=3600):
     """暂停后台任务，等待前端选择 continue 或 abort。"""
     with _tasks_lock:
         task = _tasks[task_id]
         event = task['decision_event']
         event.clear()
         task.update(status='waiting_user', decision=None, decision_stage=stage,
-                    error=str(error), message=f'{stage}失败，请选择继续或退出')
+                    decision_prompt=prompt, error=str(error), message=f'{stage}失败，请选择继续或退出')
     if not event.wait(timeout):
         raise RuntimeError(f'{stage}失败且等待用户决定超时: {error}')
     with _tasks_lock:
         decision = _tasks[task_id].get('decision')
+        decision_prompt = _tasks[task_id].get('decision_prompt', '')
         _tasks[task_id]['status'] = 'running'
         _tasks[task_id]['error'] = None
     if decision != 'continue':
         raise RuntimeError(f'用户已终止任务（{stage}失败: {error}）')
+    return decision_prompt
 
 
 def _manual_scenes(ocr_results, pages_per_segment=1, duration=5.0,
@@ -294,14 +296,16 @@ def run_pipeline(task_id, pdf_path, config):
         elif use_image_generation:
             scenes_dir = os.path.join(work_dir, 'scenes')
             try:
-                scenes = generate_all_scenes(
+                    scenes = generate_all_scenes(
                     scenes, scenes_dir, orientation=orientation,
                     api_key=image_api_key, base_url=image_base_url,
                     image_model=image_model or None,
-                    progress_callback=lambda c, t, m, img: update_task(
-                        task_id, progress=38 + int(c / (t or 1) * 35),
-                        message=m, scenes=scenes)
-                )
+                        progress_callback=lambda c, t, m, img: update_task(
+                            task_id, progress=38 + int(c / (t or 1) * 35),
+                            message=m, scenes=scenes),
+                        content_filter_callback=lambda scene, prompt, error: wait_for_decision(
+                            task_id, 'AI 生图提示词被过滤', error, prompt)
+                    )
             except Exception as error:
                 wait_for_decision(task_id, 'AI 生图', error)
                 for scene in scenes:
@@ -340,9 +344,16 @@ def run_pipeline(task_id, pdf_path, config):
                     "rich traditional color, intriguing mystery, polished poster art, no readable text, "
                     "no graphic violence, suitable for a general audience."
                 )
-                generate_scene_image(cover_prompt, cover_image, orientation=orientation,
-                                     api_key=image_api_key, base_url=image_base_url,
-                                     image_model=image_model or None)
+                try:
+                    generate_scene_image(cover_prompt, cover_image, orientation=orientation,
+                                         api_key=image_api_key, base_url=image_base_url,
+                                         image_model=image_model or None)
+                except Exception as cover_error:
+                    if 'CONTENT_FILTERED' in str(cover_error).upper():
+                        cover_image = ''
+                        update_task(task_id, message='AI 封面被内容过滤，已跳过封面并继续正文视频')
+                    else:
+                        raise
             if cover_image and os.path.exists(cover_image):
                 scenes.insert(0, {'scene_number': 0, 'page_source': 0,
                                   'narration': '', 'dialogue': [], 'duration': cover_duration,
@@ -608,6 +619,7 @@ def get_progress(task_id):
         'has_prompts': bool(task.get('prompts_path')),
         'has_subtitles': bool(task.get('subtitle_path')),
         'decision_stage': task.get('decision_stage'),
+        'decision_prompt': task.get('decision_prompt', ''),
     })
 
 
@@ -623,6 +635,7 @@ def task_decision(task_id):
         if task.get('status') != 'waiting_user':
             return jsonify({'error': '任务当前不需要用户决定'}), 409
         task['decision'] = decision
+        task['decision_prompt'] = (request.json or {}).get('prompt', '').strip()
         task['decision_event'].set()
     return jsonify({'ok': True})
 

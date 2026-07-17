@@ -25,9 +25,14 @@ class StaticEngine(VideoEngine):
             FFMPEG_BIN, "-y", "-loop", "1", "-i", image_path,
             "-vf", vf, "-t", str(duration), "-r", str(FPS),
             "-pix_fmt", "yuv420p", "-c:v", "libx264",
-            "-preset", "medium", "-crf", "20", out_path,
+            "-preset", "medium", "-threads", "2", "-crf", "20", out_path,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg 静态画面生成失败: {result.stderr[-500:]}")
+            lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+            important = [line for line in lines if any(word in line.lower() for word in (
+                'error', 'invalid', 'failed', 'unable', 'could not', 'no space', 'memory'
+            ))]
+            detail = " | ".join((important[-8:] or lines[-12:]))
+            raise RuntimeError(f"ffmpeg 静态画面生成失败: {detail[-2500:]}")
         return out_path

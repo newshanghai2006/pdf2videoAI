@@ -197,6 +197,9 @@ def run_pipeline(task_id, pdf_path, config):
         image_model = config.get('image_model', '')
         video_engine = config.get('video_engine', DEFAULT_VIDEO_ENGINE)
         export_prompts = config.get('export_prompts', False)
+        cover_mode = config.get('cover_mode', 'none')
+        cover_path = config.get('cover_path', '')
+        cover_duration = max(1.0, float(config.get('cover_duration', 3) or 3))
 
         width, height = RESOLUTIONS.get(resolution, (1920, 1080))
 
@@ -324,6 +327,27 @@ def run_pipeline(task_id, pdf_path, config):
                     else page_by_num.get(page_num) or sequential_path
                 )
             update_task(task_id, message='已跳过 AI 画面生成，使用 PDF 原页面')
+
+        # ===== 可选片头封面 =====
+        if cover_mode in ('ai', 'upload'):
+            cover_image = cover_path
+            if cover_mode == 'ai':
+                from core.image_generator import generate_scene_image
+                cover_image = os.path.join(work_dir, 'cover.png')
+                cover_prompt = (
+                    "A striking cinematic cover image for a Chinese historical comic video, "
+                    "high visual impact, dramatic lighting, clear central characters, bold composition, "
+                    "rich traditional color, intriguing mystery, polished poster art, no readable text, "
+                    "no graphic violence, suitable for a general audience."
+                )
+                generate_scene_image(cover_prompt, cover_image, orientation=orientation,
+                                     api_key=image_api_key, base_url=image_base_url,
+                                     image_model=image_model or None)
+            if cover_image and os.path.exists(cover_image):
+                scenes.insert(0, {'scene_number': 0, 'page_source': 0,
+                                  'narration': '', 'dialogue': [], 'duration': cover_duration,
+                                  'image_path': cover_image, 'is_cover': True})
+                update_task(task_id, scenes=scenes, message='片头封面已加入影片')
         update_task(task_id, scenes=scenes, progress=73,
                     message='全部画面生成完成')
 
@@ -542,6 +566,9 @@ def start_process():
         'manual_duration': float(data.get('manual_duration', 5) or 5),
         'manual_durations': data.get('manual_durations', '').strip(),
         'manual_narration': data.get('manual_narration', ''),
+        'cover_mode': data.get('cover_mode', 'none').strip(),
+        'cover_path': data.get('cover_path', '').strip(),
+        'cover_duration': float(data.get('cover_duration', 3) or 3),
         'use_tts': data.get('use_tts', True),
         'tts_voice': data.get('tts_voice', 'zh-CN-YunxiNeural'),
         'dialogue_voice': data.get('dialogue_voice', '').strip() or DEFAULT_DIALOGUE_VOICE,
@@ -705,6 +732,19 @@ def upload_srt():
     path = os.path.join(UPLOAD_DIR, f"srt_{uuid.uuid4().hex[:8]}_{filename}")
     file.save(path)
     return jsonify({'srt_path': path, 'filename': filename})
+
+
+@app.route('/api/upload_cover', methods=['POST'])
+def upload_cover():
+    if 'file' not in request.files:
+        return jsonify({'error': '没有封面图片'}), 400
+    file = request.files['file']
+    if not file.filename or not file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+        return jsonify({'error': '封面仅支持 PNG/JPG/JPEG/WEBP'}), 400
+    filename = secure_filename(file.filename) or 'cover.png'
+    path = os.path.join(UPLOAD_DIR, f"cover_{uuid.uuid4().hex[:8]}_{filename}")
+    file.save(path)
+    return jsonify({'cover_path': path, 'filename': filename})
 
 
 if __name__ == '__main__':

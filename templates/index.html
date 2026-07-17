@@ -194,6 +194,9 @@
                     <!-- 页面范围 -->
                     <div class="config-section">
                         <h3>📖 页面范围</h3>
+                        <div class="form-group"><label>片头封面</label><select id="coverMode" class="input"><option value="none">不添加封面</option><option value="ai">AI 生成吸睛封面</option><option value="upload">使用上传图片</option></select></div>
+                        <div class="form-group" id="coverUploadGroup" style="display:none;"><input type="file" id="coverInput" accept="image/png,image/jpeg,image/webp"><span id="coverName"></span></div>
+                        <div class="form-group"><label>封面时长（秒）</label><input type="number" id="coverDuration" class="input" value="3" min="1" step="0.5"></div>
                         <div class="form-group"><label>OCR 文字语言</label><select id="ocrLanguage" class="input"><option value="ch">简体/中文</option><option value="chinese_cht">繁体中文</option><option value="en">英文</option></select></div>
                         <div class="form-group"><label>每段视频包含页数 <span class="hint">(手动模式生效)</span></label><input type="number" id="pagesPerSegment" class="input" value="1" min="1"></div>
                         <div class="form-row">

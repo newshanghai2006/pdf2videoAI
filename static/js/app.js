@@ -6,6 +6,7 @@ let state = {
     pdfName: '',
     pageCount: 0,
     bgmPath: '',
+    coverPath: '',
     taskId: null,
     pollTimer: null,
     lastSceneCount: 0,
@@ -20,11 +21,29 @@ document.addEventListener('DOMContentLoaded', () => {
     setupStepNavigation();
     setupConfigControls();
     setupBgmUpload();
+    setupCoverUpload();
     setupProcessButton();
     setupTestButton();
     document.getElementById('btnContinueWithoutAi').addEventListener('click', () => submitDecision('continue'));
     document.getElementById('btnAbortTask').addEventListener('click', () => submitDecision('abort'));
 });
+
+function setupCoverUpload() {
+    const mode = document.getElementById('coverMode');
+    const input = document.getElementById('coverInput');
+    mode.addEventListener('change', () => {
+        document.getElementById('coverUploadGroup').style.display = mode.value === 'upload' ? 'block' : 'none';
+    });
+    input.addEventListener('change', async () => {
+        if (!input.files.length) return;
+        const form = new FormData(); form.append('file', input.files[0]);
+        const response = await fetch('/api/upload_cover', {method: 'POST', body: form});
+        const data = await response.json();
+        if (data.error) { alert(data.error); return; }
+        state.coverPath = data.cover_path;
+        document.getElementById('coverName').textContent = data.filename;
+    });
+}
 
 async function submitDecision(decision) {
     if (!state.taskId) return;
@@ -580,6 +599,9 @@ async function startProcessing() {
         manual_duration: parseFloat(document.getElementById('manualDuration').value) || 5,
         manual_durations: document.getElementById('manualDurations').value.trim(),
         manual_narration: document.getElementById('manualNarration').value,
+        cover_mode: document.getElementById('coverMode').value,
+        cover_path: state.coverPath || '',
+        cover_duration: parseFloat(document.getElementById('coverDuration').value) || 3,
         use_tts: document.getElementById('useTts').checked,
         tts_voice: document.getElementById('ttsVoice').value,
         dialogue_voice: document.getElementById('dialogueVoice').value,

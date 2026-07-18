@@ -578,6 +578,39 @@ def upload_pdf():
         return jsonify({'error': f'上传处理失败: {e}'}), 500
 
 
+@app.route('/api/ocr_preview', methods=['POST'])
+def ocr_preview():
+    """手动模式预览 OCR 文本，供用户修改后作为伴读内容。"""
+    data = request.json or {}
+    pdf_path = data.get('pdf_path', '')
+    if not pdf_path or not os.path.exists(pdf_path):
+        return jsonify({'error': 'PDF文件不存在'}), 400
+    try:
+        import tempfile
+        from core.pdf_processor import extract_pages
+        from core.ocr_processor import ocr_pages
+        from core.pdf_processor import parse_page_selection
+        from core.pdf_processor import get_page_count
+        total = get_page_count(pdf_path)
+        selection = data.get('page_selection', '').strip()
+        pages = parse_page_selection(selection, total) if selection else list(range(1, total + 1))
+        work = tempfile.mkdtemp(prefix='ocr_preview_')
+        try:
+            images = extract_pages(pdf_path, work, start_page=min(pages), end_page=max(pages))
+            wanted = {p: os.path.join(work, f'page_{p:04d}.png') for p in pages}
+            images = [wanted[p] for p in pages if os.path.exists(wanted[p])]
+            results = ocr_pages(images, language=data.get('ocr_language', 'ch'))
+            size = max(1, int(data.get('pages_per_segment', 1) or 1))
+            segments = ['\n'.join(r.get('text', '').strip() for r in results[i:i + size]).strip()
+                        for i in range(0, len(results), size)]
+            return jsonify({'segments': segments, 'page_count': len(pages)})
+        finally:
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
+    except Exception as error:
+        return jsonify({'error': f'OCR预览失败: {error}'}), 500
+
+
 @app.route('/api/process', methods=['POST'])
 def start_process():
     """启动影片生成管线"""

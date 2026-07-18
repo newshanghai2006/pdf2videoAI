@@ -18,6 +18,8 @@ import shutil
 from config import FFMPEG_BIN, FFPROBE_BIN, FPS
 from .video_engines import get_engine
 
+MAX_SCENE_DURATION = 60.0
+
 
 # ===== 基础工具 =====
 
@@ -93,7 +95,8 @@ def _scene_duration(scene, use_tts):
         dur = _get_audio_duration(valid_audio, default=scene.get("duration", 5))
     else:
         dur = float(scene.get("duration", 5) or 5)
-    return max(1.0, dur)
+    # OCR/TTS 异常可能产生数百秒的单段音频；限制单段时长，避免静态 FFmpeg 长时间超时。
+    return min(MAX_SCENE_DURATION, max(1.0, dur))
 
 
 # ===== 逐场景合成：画面 + 配音 → 自洽同步片段 =====

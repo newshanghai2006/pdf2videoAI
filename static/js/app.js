@@ -22,11 +22,33 @@ document.addEventListener('DOMContentLoaded', () => {
     setupConfigControls();
     setupBgmUpload();
     setupCoverUpload();
+    document.getElementById('btnLoadOcrText').addEventListener('click', loadOcrPreview);
     setupProcessButton();
     setupTestButton();
     document.getElementById('btnContinueWithoutAi').addEventListener('click', () => submitDecision('continue'));
     document.getElementById('btnAbortTask').addEventListener('click', () => submitDecision('abort'));
 });
+
+async function loadOcrPreview() {
+    if (!state.pdfPath) { alert('请先上传 PDF'); return; }
+    const button = document.getElementById('btnLoadOcrText');
+    button.disabled = true; button.textContent = 'OCR 读取中...';
+    try {
+        const response = await fetch('/api/ocr_preview', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                pdf_path: state.pdfPath,
+                page_selection: document.getElementById('pageSelection').value.trim(),
+                pages_per_segment: parseInt(document.getElementById('pagesPerSegment').value) || 1,
+                ocr_language: document.getElementById('ocrLanguage').value,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'OCR 读取失败');
+        document.getElementById('manualNarration').value = data.segments.join('\n');
+    } catch (error) { alert(error.message); }
+    finally { button.disabled = false; button.textContent = '读取并编辑 OCR 文本'; }
+}
 
 function setupCoverUpload() {
     const mode = document.getElementById('coverMode');

@@ -142,10 +142,10 @@ def _manual_scenes(ocr_results, pages_per_segment=1, duration=5.0,
     scenes = []
     for start in range(0, len(ocr_results), pages_per_segment):
         group = ocr_results[start:start + pages_per_segment]
-        text = " ".join(" ".join(x.get('text', '').replace('\r', ' ').replace('\n', ' ').split()) for x in group).strip()
+        text = "".join(x.get('text', '').replace('\r', '').replace('\n', '') for x in group).strip()
         idx = len(scenes)
         narration = narration_lines[idx].strip() if idx < len(narration_lines) and narration_lines[idx].strip() else text
-        narration = ' '.join(narration.replace('\r', ' ').replace('\n', ' ').split())
+        narration = narration.replace('\r', '').replace('\n', '').strip()
         scene_duration = float(segment_durations[idx]) if segment_durations and idx < len(segment_durations) and segment_durations[idx] else float(duration)
         scenes.append({'scene_number': idx + 1, 'page_source': group[0]['page_num'],
                        'page_sources': [x['page_num'] for x in group],

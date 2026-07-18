@@ -146,7 +146,7 @@ def generate_scene_narrations(scenes, output_dir,
         # 组装分段：旁白（narration 声音）+ 各条台词（对白声音，去掉角色名）
         seg_specs = []
         if scene.get("narration"):
-            narration = ' '.join(str(scene["narration"]).replace('\r', ' ').replace('\n', ' ').split())
+            narration = str(scene["narration"]).replace('\r', '').replace('\n', '').strip()
             scene['narration'] = narration
             seg_specs.append(("narration", narration))
         for d in scene.get("dialogue", []):

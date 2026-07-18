@@ -626,6 +626,38 @@ select.input {
     resize: vertical;
 }
 
+.decision-scenes {
+    display: grid;
+    gap: 14px;
+    margin: 14px 0;
+    text-align: left;
+    max-height: 520px;
+    overflow-y: auto;
+}
+
+.decision-scene-item {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 12px;
+}
+
+.decision-scene-title {
+    color: var(--text);
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.decision-scene-image {
+    display: block;
+    width: min(100%, 360px);
+    max-height: 180px;
+    object-fit: contain;
+    background: #000;
+    border-radius: var(--radius-sm);
+    margin-bottom: 8px;
+}
+
 /* ===== 结果区 ===== */
 .result-container {
     text-align: center;

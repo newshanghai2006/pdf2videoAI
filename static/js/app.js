@@ -7,9 +7,9 @@ let state = {
     pageCount: 0,
     bgmPath: '',
     coverPath: '',
-    ocrResults: null,
-    ocrSignature: '',
     decisionTimer: null,
+    decisionCountdownInterval: null,
+    decisionSeconds: 60,
     taskId: null,
     pollTimer: null,
     lastSceneCount: 0,
@@ -25,52 +25,12 @@ document.addEventListener('DOMContentLoaded', () => {
     setupConfigControls();
     setupBgmUpload();
     setupCoverUpload();
-    document.getElementById('btnLoadOcrText').addEventListener('click', loadOcrPreview);
     setupProcessButton();
     setupTestButton();
     document.getElementById('btnContinueWithoutAi').addEventListener('click', () => submitDecision('continue'));
     document.getElementById('btnAbortTask').addEventListener('click', () => submitDecision('abort'));
 });
 
-async function loadOcrPreview() {
-    if (!state.pdfPath) { alert('请先上传 PDF'); return; }
-    const button = document.getElementById('btnLoadOcrText');
-    if (window.ocrPreviewController) {
-        window.ocrPreviewController.abort();
-        window.ocrPreviewController = null;
-        button.textContent = '读取并编辑 OCR 文本';
-        button.disabled = false;
-        return;
-    }
-    window.ocrPreviewController = new AbortController();
-    button.disabled = false; button.textContent = '取消 OCR 读取';
-    try {
-        const response = await fetch('/api/ocr_preview', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            signal: window.ocrPreviewController.signal,
-            body: JSON.stringify({
-                pdf_path: state.pdfPath,
-                page_selection: document.getElementById('pageSelection').value.trim(),
-                pages_per_segment: parseInt(document.getElementById('pagesPerSegment').value) || 1,
-                ocr_language: document.getElementById('ocrLanguage').value,
-            }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'OCR 读取失败');
-        state.ocrResults = data.pages || null;
-        state.ocrSignature = [
-            document.getElementById('pageSelection').value.trim(),
-            document.getElementById('pagesPerSegment').value,
-            document.getElementById('ocrLanguage').value,
-        ].join('|');
-        document.getElementById('manualNarration').value = data.segments.join('\n');
-    } catch (error) {
-        if (error.name !== 'AbortError') alert(error.message);
-    } finally {
-        window.ocrPreviewController = null;
-        button.disabled = false; button.textContent = '读取并编辑 OCR 文本';
-    }
-}
 
 function setupCoverUpload() {
     const mode = document.getElementById('coverMode');
@@ -95,15 +55,25 @@ async function submitDecision(decision) {
         clearTimeout(state.decisionTimer);
         state.decisionTimer = null;
     }
+    if (state.decisionCountdownInterval) {
+        clearInterval(state.decisionCountdownInterval);
+        state.decisionCountdownInterval = null;
+    }
     const res = await fetch(`/api/decision/${state.taskId}`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({decision, prompt: document.getElementById('decisionPrompt').value}),
+        body: JSON.stringify({decision, prompt: collectDecisionPrompt()}),
     });
     const data = await res.json();
     if (!res.ok) { alert(data.error || '提交选择失败'); return; }
     document.getElementById('decisionBox').style.display = 'none';
     document.getElementById('progressMessage').textContent =
         decision === 'continue' ? '正在以无 AI 模式继续...' : '正在退出任务...';
+}
+
+function collectDecisionPrompt() {
+    const fields = document.querySelectorAll('.decision-scene-prompt');
+    if (fields.length) return Array.from(fields).map(field => field.value).join('\n');
+    return document.getElementById('decisionPrompt').value;
 }
 
 const savedSettingFields = [
@@ -420,21 +390,6 @@ function setupConfigControls() {
     const syncAnalysisMode = () => { manualConfig.style.display = aiToggle.checked ? 'none' : 'block'; };
     aiToggle.addEventListener('change', syncAnalysisMode);
     syncAnalysisMode();
-    document.getElementById('srtInput').addEventListener('change', async (event) => {
-        const file = event.target.files[0];
-        if (!file) return;
-        const text = await file.text();
-        const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
-        const entries = [];
-        let current = [];
-        for (const line of lines) {
-            if (!line.trim()) { if (current.length) entries.push(current.join('\n')); current = []; continue; }
-            if (/^\d+$/.test(line.trim()) || line.includes('-->')) continue;
-            current.push(line.trim());
-        }
-        if (current.length) entries.push(current.join('\n'));
-        document.getElementById('manualNarration').value = entries.join('\n');
-    });
     // 方向切换
     document.querySelectorAll('#orientationToggle .toggle-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -644,14 +599,10 @@ async function startProcessing() {
         use_ai_analysis: document.getElementById('useAiAnalysis').checked,
         ocr_language: document.getElementById('ocrLanguage').value,
         pages_per_segment: parseInt(document.getElementById('pagesPerSegment').value) || 1,
+        page_layout: document.getElementById('pageLayout').value,
         manual_duration: parseFloat(document.getElementById('manualDuration').value) || 5,
         manual_durations: document.getElementById('manualDurations').value.trim(),
-        manual_narration: document.getElementById('manualNarration').value,
-        ocr_results: state.ocrSignature === [
-            pageSelection,
-            document.getElementById('pagesPerSegment').value,
-            document.getElementById('ocrLanguage').value,
-        ].join('|') ? state.ocrResults : null,
+        manual_narration: '',
         cover_mode: document.getElementById('coverMode').value,
         cover_path: state.coverPath || '',
         cover_duration: parseFloat(document.getElementById('coverDuration').value) || 3,
@@ -738,19 +689,47 @@ async function pollProgress() {
         if (data.status === 'waiting_user') {
             const box = document.getElementById('decisionBox');
             box.style.display = 'block';
-            document.getElementById('decisionTitle').textContent = `${data.decision_stage || 'AI 处理'}失败`;
-            document.getElementById('decisionMsg').textContent = data.error || data.message;
+            const isTtsConfirmation = (data.decision_stage || '').includes('TTS');
+            document.getElementById('decisionTitle').textContent = isTtsConfirmation
+                ? '请确认伴读文字' : `${data.decision_stage || 'AI 处理'}失败`;
+            document.getElementById('decisionMsg').textContent = isTtsConfirmation
+                ? '请检查每个场景下方的文字，修改后确认；60 秒后将自动继续。'
+                : (data.error || data.message);
             const promptBox = document.getElementById('decisionPrompt');
+            const sceneEditor = document.getElementById('decisionScenes');
             const promptMode = (data.decision_stage || '').includes('提示词');
             const ttsMode = (data.decision_stage || '').includes('TTS');
             promptBox.style.display = (promptMode || ttsMode) ? 'block' : 'none';
             // 轮询每秒执行一次；用户获得焦点后不能再用服务端旧值覆盖正在编辑的内容。
             if (document.activeElement !== promptBox) {
-                promptBox.value = data.decision_prompt || '';
+            promptBox.value = data.decision_prompt || '';
+            if (ttsMode) {
+                promptBox.style.display = 'none';
+                sceneEditor.style.display = 'grid';
+                if (!sceneEditor.children.length || sceneEditor.dataset.taskId !== state.taskId) {
+                    sceneEditor.dataset.taskId = state.taskId;
+                    sceneEditor.innerHTML = (data.scenes || []).map((scene, index) => `
+                        <div class="decision-scene-item">
+                            <div class="decision-scene-title">场景 ${index + 1}</div>
+                            <img class="decision-scene-image" src="/api/scene_image/${state.taskId}/${index}" alt="场景 ${index + 1}">
+                            <textarea class="input decision-scene-prompt" rows="4">${escapeHtml(scene.narration || '')}</textarea>
+                        </div>`).join('');
+                }
+            } else {
+                sceneEditor.style.display = 'none';
+                sceneEditor.innerHTML = '';
+            }
             }
             document.getElementById('btnContinueWithoutAi').textContent = promptMode ? '修改后重新提交' : (ttsMode ? '确认文本并生成配音' : '无 AI 继续');
             if (ttsMode && !state.decisionTimer) {
+                state.decisionSeconds = 60;
                 state.decisionTimer = setTimeout(() => submitDecision('continue'), 60000);
+                state.decisionCountdownInterval = setInterval(() => {
+                    state.decisionSeconds = Math.max(0, state.decisionSeconds - 1);
+                    const countdownText = `请检查每个场景下方的文字，修改后确认；${state.decisionSeconds} 秒后将自动继续。`;
+                    document.getElementById('decisionMsg').textContent = countdownText;
+                    document.getElementById('btnContinueWithoutAi').textContent = `确认文本并生成配音（${state.decisionSeconds}秒）`;
+                }, 1000);
             }
         } else if (data.status === 'completed') {
             clearInterval(state.pollTimer);

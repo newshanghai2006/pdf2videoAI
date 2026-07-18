@@ -150,23 +150,30 @@ def _manual_scenes(ocr_results, pages_per_segment=1, duration=5.0,
     return scenes
 
 
-def _combine_page_images(paths, output_path):
-    """将同一视频段的多页按纵向拼接为一张完整画面。"""
+def _combine_page_images(paths, output_path, layout='vertical'):
+    """将同一视频段的多页按横向或纵向拼接为一张完整画面。"""
     images = [Image.open(path).convert('RGB') for path in paths if os.path.exists(path)]
     if not images:
         return None
-    width = max(image.width for image in images)
+    horizontal = layout == 'horizontal'
+    base_size = max(image.height if horizontal else image.width for image in images)
     normalized = []
     for image in images:
-        if image.width != width:
-            height = max(1, round(image.height * width / image.width))
-            image = image.resize((width, height), Image.Resampling.LANCZOS)
+        current = image.height if horizontal else image.width
+        if current != base_size:
+            if horizontal:
+                image = image.resize((max(1, round(image.width * base_size / image.height)), base_size), Image.Resampling.LANCZOS)
+            else:
+                image = image.resize((base_size, max(1, round(image.height * base_size / image.width))), Image.Resampling.LANCZOS)
         normalized.append(image)
-    canvas = Image.new('RGB', (width, sum(image.height for image in normalized)), 'white')
-    top = 0
+    if horizontal:
+        canvas = Image.new('RGB', (sum(image.width for image in normalized), base_size), 'white')
+    else:
+        canvas = Image.new('RGB', (base_size, sum(image.height for image in normalized)), 'white')
+    cursor = 0
     for image in normalized:
-        canvas.paste(image, (0, top))
-        top += image.height
+        canvas.paste(image, (cursor, 0) if horizontal else (0, cursor))
+        cursor += image.width if horizontal else image.height
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     canvas.save(output_path, 'PNG')
     for image in images:
@@ -208,6 +215,9 @@ def run_pipeline(task_id, pdf_path, config):
         start_page = config.get('start_page', 1)
         end_page = config.get('end_page', None)
         page_selection = config.get('page_selection', '')
+        page_layout = config.get('page_layout', 'auto')
+        if page_layout == 'auto':
+            page_layout = 'horizontal' if orientation == 'landscape' else 'vertical'
         use_ai_analysis = config.get('use_ai_analysis', True)
         ocr_language = config.get('ocr_language', 'ch')
         # 手动模式必须由页数组合控制场景边界，避免服务商预设自动开启 AI 生图
@@ -367,7 +377,7 @@ def run_pipeline(task_id, pdf_path, config):
                                 if isinstance(n, int) and 1 <= n <= len(page_images)]
                 if len(source_paths) > 1:
                     combined = os.path.join(work_dir, 'manual_pages', f'segment_{scene_index + 1:04d}.png')
-                    scene['image_path'] = _combine_page_images(source_paths, combined)
+                    scene['image_path'] = _combine_page_images(source_paths, combined, page_layout)
                 else:
                     scene['image_path'] = (
                         sequential_path if repeated_single_source
@@ -413,7 +423,7 @@ def run_pipeline(task_id, pdf_path, config):
             narration_prompt = '\n'.join(str(scene.get('narration') or '') for scene in scenes)
             confirmed_text = wait_for_decision(
                 task_id, 'TTS 伴读文本确认', '请检查并确认每个场景的伴读文字',
-                prompt=narration_prompt, timeout=60
+                prompt=narration_prompt, timeout=75
             )
             if confirmed_text:
                 edited_lines = confirmed_text.splitlines()
@@ -659,6 +669,7 @@ def start_process():
         'start_page': int(data.get('start_page', 1)),
         'end_page': int(data.get('end_page', 0)) or None,
         'page_selection': data.get('page_selection', '').strip(),
+        'page_layout': data.get('page_layout', 'auto').strip(),
         'use_ai_analysis': use_ai_analysis,
         'ocr_language': data.get('ocr_language', 'ch').strip(),
         'pages_per_segment': int(data.get('pages_per_segment', 1) or 1),

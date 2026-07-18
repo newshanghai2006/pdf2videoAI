@@ -64,7 +64,11 @@ async function submitDecision(decision) {
         body: JSON.stringify({decision, prompt: collectDecisionPrompt()}),
     });
     const data = await res.json();
-    if (!res.ok) { alert(data.error || '提交选择失败'); return; }
+    // 自动提交与用户点击可能同时到达；任务已恢复时的 409 不应再次弹窗。
+    if (!res.ok) {
+        if (res.status !== 409) alert(data.error || '提交选择失败');
+        return;
+    }
     document.getElementById('decisionBox').style.display = 'none';
     document.getElementById('progressMessage').textContent =
         decision === 'continue' ? '正在以无 AI 模式继续...' : '正在退出任务...';
@@ -607,6 +611,7 @@ async function startProcessing() {
         cover_path: state.coverPath || '',
         cover_duration: parseFloat(document.getElementById('coverDuration').value) || 3,
         use_tts: document.getElementById('useTts').checked,
+        auto_duration_tts: document.getElementById('autoDurationTts').checked,
         tts_voice: document.getElementById('ttsVoice').value,
         dialogue_voice: document.getElementById('dialogueVoice').value,
         video_engine: document.getElementById('videoEngine').value,
@@ -714,6 +719,16 @@ async function pollProgress() {
                             <img class="decision-scene-image" src="/api/scene_image/${state.taskId}/${index}" alt="场景 ${index + 1}">
                             <textarea class="input decision-scene-prompt" rows="4">${escapeHtml(scene.narration || '')}</textarea>
                         </div>`).join('');
+                    sceneEditor.querySelectorAll('.decision-scene-prompt').forEach(field => {
+                        const stopCountdown = () => {
+                            if (state.decisionTimer) { clearTimeout(state.decisionTimer); state.decisionTimer = null; }
+                            if (state.decisionCountdownInterval) { clearInterval(state.decisionCountdownInterval); state.decisionCountdownInterval = null; }
+                            document.getElementById('decisionMsg').textContent = '已开始编辑，倒计时已停止。修改完成后请点击确认。';
+                            document.getElementById('btnContinueWithoutAi').textContent = '确认文本并生成配音';
+                        };
+                        field.addEventListener('focus', stopCountdown);
+                        field.addEventListener('input', stopCountdown);
+                    });
                 }
             } else {
                 sceneEditor.style.display = 'none';

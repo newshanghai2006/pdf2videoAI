@@ -84,13 +84,13 @@ def _valid_audio_path(audio_path):
         return None
 
 
-def _scene_duration(scene, use_tts):
+def _scene_duration(scene, use_tts, auto_duration_tts=True):
     """确定某场景片段应有的时长（秒）。
 
     有配音 → 取配音真实时长（不夹取，保证音画一致）；
     无配音 → 取场景建议 duration，兜底 5s。仅做一个宽松下限避免 0 时长。
     """
-    valid_audio = _valid_audio_path(scene.get("audio_path")) if use_tts else None
+    valid_audio = _valid_audio_path(scene.get("audio_path")) if use_tts and auto_duration_tts else None
     if valid_audio:
         dur = _get_audio_duration(valid_audio, default=scene.get("duration", 5))
     else:
@@ -195,7 +195,7 @@ def _mix_bgm(video_path, output_path, bgm_path, bgm_volume=0.15):
 def build_film(scenes, output_path, width, height,
                bgm_path=None, bgm_volume=0.15,
                use_tts=True, video_engine="kenburns", engine_opts=None,
-               progress_callback=None):
+               progress_callback=None, auto_duration_tts=True):
     """合成最终影片。
 
     Args:
@@ -227,7 +227,7 @@ def build_film(scenes, output_path, width, height,
                 pct = int(i / total * 70)
                 progress_callback(pct, f"合成场景 {i + 1}/{total}")
 
-            duration = _scene_duration(scene, use_tts)
+            duration = _scene_duration(scene, use_tts, auto_duration_tts)
 
             # 1) 引擎生成「时长恰为 duration」的无声画面片段
             silent = os.path.join(tmp_dir, f"silent_{i:04d}.mp4")

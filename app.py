@@ -117,8 +117,11 @@ def wait_for_decision(task_id, stage, error, prompt='', timeout=3600):
         task = _tasks[task_id]
         event = task['decision_event']
         event.clear()
+        confirmation = stage.startswith('TTS')
         task.update(status='waiting_user', decision=None, decision_stage=stage,
-                    decision_prompt=prompt, error=str(error), message=f'{stage}失败，请选择继续或退出')
+                    decision_prompt=prompt,
+                    error='' if confirmation else str(error),
+                    message='请确认每个场景的伴读文字' if confirmation else f'{stage}失败，请选择继续或退出')
     if not event.wait(timeout):
         raise RuntimeError(f'{stage}失败且等待用户决定超时: {error}')
     with _tasks_lock:
@@ -243,6 +246,7 @@ def run_pipeline(task_id, pdf_path, config):
         cover_mode = config.get('cover_mode', 'none')
         cover_path = config.get('cover_path', '')
         cover_duration = max(1.0, float(config.get('cover_duration', 3) or 3))
+        auto_duration_tts = config.get('auto_duration_tts', True)
 
         width, height = RESOLUTIONS.get(resolution, (1920, 1080))
 
@@ -297,6 +301,14 @@ def run_pipeline(task_id, pdf_path, config):
             story = {'title': '手动分段', 'scenes': _manual_scenes(
                 ocr_results, config.get('pages_per_segment', 1),
                 config.get('manual_duration', 5), lines, durations)}
+            expected_segments = (len(page_images) + max(1, int(config.get('pages_per_segment', 1) or 1)) - 1) // max(1, int(config.get('pages_per_segment', 1) or 1))
+            if len(story['scenes']) != expected_segments:
+                story['scenes'] = _manual_scenes(
+                    ocr_results[:len(page_images)], config.get('pages_per_segment', 1),
+                    config.get('manual_duration', 5), lines, durations)
+            update_task(task_id, message=(
+                f"手动分段完成：实际提取 {len(page_images)} 页，生成 {len(story['scenes'])} 个视频段，"
+                f"每段 {max(1, int(config.get('pages_per_segment', 1) or 1))} 页"))
 
         scenes = story.get('scenes', [])
         update_task(task_id, scenes=scenes, progress=36,
@@ -423,7 +435,7 @@ def run_pipeline(task_id, pdf_path, config):
             narration_prompt = '\n'.join(str(scene.get('narration') or '') for scene in scenes)
             confirmed_text = wait_for_decision(
                 task_id, 'TTS 伴读文本确认', '请检查并确认每个场景的伴读文字',
-                prompt=narration_prompt, timeout=75
+                prompt=narration_prompt, timeout=180
             )
             if confirmed_text:
                 edited_lines = confirmed_text.splitlines()
@@ -475,7 +487,8 @@ def run_pipeline(task_id, pdf_path, config):
             },
             progress_callback=lambda pct, msg: update_task(
                 task_id, progress=87 + int(pct / 100 * 13),
-                message=msg)
+                message=msg),
+            auto_duration_tts=auto_duration_tts,
         )
 
         # 完成
@@ -680,6 +693,7 @@ def start_process():
         'cover_mode': data.get('cover_mode', 'none').strip(),
         'cover_path': data.get('cover_path', '').strip(),
         'cover_duration': float(data.get('cover_duration', 3) or 3),
+        'auto_duration_tts': bool(data.get('auto_duration_tts', True)),
         'use_tts': data.get('use_tts', True),
         'tts_voice': data.get('tts_voice', 'zh-CN-YunxiNeural'),
         'dialogue_voice': data.get('dialogue_voice', '').strip() or DEFAULT_DIALOGUE_VOICE,

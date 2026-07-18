@@ -210,6 +210,11 @@ def run_pipeline(task_id, pdf_path, config):
         page_selection = config.get('page_selection', '')
         use_ai_analysis = config.get('use_ai_analysis', True)
         ocr_language = config.get('ocr_language', 'ch')
+        # 手动模式必须由页数组合控制场景边界，避免服务商预设自动开启 AI 生图
+        # 后重新按单个 scene 生成画面，导致 N 页设置看起来失效。
+        if not use_ai_analysis:
+            use_image_generation = False
+            colorize_pages_enabled = False
         if ocr_language == 'chinese_cht':
             # RapidOCR 中文模型同时覆盖繁体字；避免传入不支持的语言标识。
             ocr_language = 'ch'

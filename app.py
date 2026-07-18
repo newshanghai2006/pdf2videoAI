@@ -9,6 +9,7 @@ import json
 import threading
 import time
 import traceback
+from PIL import Image
 
 from flask import Flask, request, jsonify, send_file, render_template, url_for
 from werkzeug.utils import secure_filename
@@ -143,9 +144,34 @@ def _manual_scenes(ocr_results, pages_per_segment=1, duration=5.0,
         narration = narration_lines[idx].strip() if idx < len(narration_lines) and narration_lines[idx].strip() else text
         scene_duration = float(segment_durations[idx]) if segment_durations and idx < len(segment_durations) and segment_durations[idx] else float(duration)
         scenes.append({'scene_number': idx + 1, 'page_source': group[0]['page_num'],
+                       'page_sources': [x['page_num'] for x in group],
                        'narration': narration, 'dialogue': [], 'image_prompt': '',
                        'mood': 'calm', 'duration': max(1.0, scene_duration)})
     return scenes
+
+
+def _combine_page_images(paths, output_path):
+    """将同一视频段的多页按纵向拼接为一张完整画面。"""
+    images = [Image.open(path).convert('RGB') for path in paths if os.path.exists(path)]
+    if not images:
+        return None
+    width = max(image.width for image in images)
+    normalized = []
+    for image in images:
+        if image.width != width:
+            height = max(1, round(image.height * width / image.width))
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+        normalized.append(image)
+    canvas = Image.new('RGB', (width, sum(image.height for image in normalized)), 'white')
+    top = 0
+    for image in normalized:
+        canvas.paste(image, (0, top))
+        top += image.height
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    canvas.save(output_path, 'PNG')
+    for image in images:
+        image.close()
+    return output_path
 
 
 # ===== 核心管线 =====
@@ -326,10 +352,17 @@ def run_pipeline(task_id, pdf_path, config):
             for scene_index, scene in enumerate(scenes):
                 page_num = int(scene.get('page_source') or 0)
                 sequential_path = page_images[scene_index % len(page_images)]
-                scene['image_path'] = (
-                    sequential_path if repeated_single_source
-                    else page_by_num.get(page_num) or sequential_path
-                )
+                source_numbers_for_scene = scene.get('page_sources') or [page_num]
+                source_paths = [page_images[n - 1] for n in source_numbers_for_scene
+                                if isinstance(n, int) and 1 <= n <= len(page_images)]
+                if len(source_paths) > 1:
+                    combined = os.path.join(work_dir, 'manual_pages', f'segment_{scene_index + 1:04d}.png')
+                    scene['image_path'] = _combine_page_images(source_paths, combined)
+                else:
+                    scene['image_path'] = (
+                        sequential_path if repeated_single_source
+                        else page_by_num.get(page_num) or sequential_path
+                    )
             update_task(task_id, message='已跳过 AI 画面生成，使用 PDF 原页面')
 
         # ===== 可选片头封面 =====

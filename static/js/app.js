@@ -32,10 +32,19 @@ document.addEventListener('DOMContentLoaded', () => {
 async function loadOcrPreview() {
     if (!state.pdfPath) { alert('请先上传 PDF'); return; }
     const button = document.getElementById('btnLoadOcrText');
-    button.disabled = true; button.textContent = 'OCR 读取中...';
+    if (window.ocrPreviewController) {
+        window.ocrPreviewController.abort();
+        window.ocrPreviewController = null;
+        button.textContent = '读取并编辑 OCR 文本';
+        button.disabled = false;
+        return;
+    }
+    window.ocrPreviewController = new AbortController();
+    button.disabled = false; button.textContent = '取消 OCR 读取';
     try {
         const response = await fetch('/api/ocr_preview', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
+            signal: window.ocrPreviewController.signal,
             body: JSON.stringify({
                 pdf_path: state.pdfPath,
                 page_selection: document.getElementById('pageSelection').value.trim(),
@@ -46,8 +55,12 @@ async function loadOcrPreview() {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'OCR 读取失败');
         document.getElementById('manualNarration').value = data.segments.join('\n');
-    } catch (error) { alert(error.message); }
-    finally { button.disabled = false; button.textContent = '读取并编辑 OCR 文本'; }
+    } catch (error) {
+        if (error.name !== 'AbortError') alert(error.message);
+    } finally {
+        window.ocrPreviewController = null;
+        button.disabled = false; button.textContent = '读取并编辑 OCR 文本';
+    }
 }
 
 function setupCoverUpload() {

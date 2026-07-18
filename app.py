@@ -255,12 +255,17 @@ def run_pipeline(task_id, pdf_path, config):
         # ===== 阶段2: OCR 文字识别 =====
         update_task(task_id, phase='ocr', progress=12,
                     message='正在OCR识别文字...')
-        ocr_results = ocr_pages(
-            page_images,
-            language=ocr_language,
-            progress_callback=lambda c, t, m: update_task(
-                task_id, progress=12 + int(c / t * 13), message=m)
-        )
+        cached_ocr = config.get('ocr_results')
+        if cached_ocr and isinstance(cached_ocr, list):
+            ocr_results = cached_ocr
+            update_task(task_id, progress=25, message='已复用预览阶段 OCR 结果')
+        else:
+            ocr_results = ocr_pages(
+                page_images,
+                language=ocr_language,
+                progress_callback=lambda c, t, m: update_task(
+                    task_id, progress=12 + int(c / t * 13), message=m)
+            )
 
         # ===== 阶段3: AI 剧情分析或手动分段 =====
         update_task(task_id, phase='analyze', progress=28,
@@ -405,6 +410,16 @@ def run_pipeline(task_id, pdf_path, config):
         # ===== 阶段5: TTS 配音 =====
         tts_ok = False
         if use_tts:
+            narration_prompt = '\n'.join(str(scene.get('narration') or '') for scene in scenes)
+            confirmed_text = wait_for_decision(
+                task_id, 'TTS 伴读文本确认', '请检查并确认每个场景的伴读文字',
+                prompt=narration_prompt, timeout=60
+            )
+            if confirmed_text:
+                edited_lines = confirmed_text.splitlines()
+                for index, scene in enumerate(scenes):
+                    if index < len(edited_lines):
+                        scene['narration'] = edited_lines[index].strip()
             update_task(task_id, phase='tts', progress=75,
                         message='正在生成旁白配音...')
             audio_dir = os.path.join(work_dir, 'audio')
@@ -603,7 +618,7 @@ def ocr_preview():
             size = max(1, int(data.get('pages_per_segment', 1) or 1))
             segments = ['\n'.join(r.get('text', '').strip() for r in results[i:i + size]).strip()
                         for i in range(0, len(results), size)]
-            return jsonify({'segments': segments, 'page_count': len(pages)})
+            return jsonify({'segments': segments, 'pages': results, 'page_count': len(pages)})
         finally:
             import shutil
             shutil.rmtree(work, ignore_errors=True)
@@ -650,6 +665,7 @@ def start_process():
         'manual_duration': float(data.get('manual_duration', 5) or 5),
         'manual_durations': data.get('manual_durations', '').strip(),
         'manual_narration': data.get('manual_narration', ''),
+        'ocr_results': data.get('ocr_results') if isinstance(data.get('ocr_results'), list) else None,
         'cover_mode': data.get('cover_mode', 'none').strip(),
         'cover_path': data.get('cover_path', '').strip(),
         'cover_duration': float(data.get('cover_duration', 3) or 3),

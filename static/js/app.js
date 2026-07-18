@@ -7,6 +7,9 @@ let state = {
     pageCount: 0,
     bgmPath: '',
     coverPath: '',
+    ocrResults: null,
+    ocrSignature: '',
+    decisionTimer: null,
     taskId: null,
     pollTimer: null,
     lastSceneCount: 0,
@@ -54,6 +57,12 @@ async function loadOcrPreview() {
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'OCR 读取失败');
+        state.ocrResults = data.pages || null;
+        state.ocrSignature = [
+            document.getElementById('pageSelection').value.trim(),
+            document.getElementById('pagesPerSegment').value,
+            document.getElementById('ocrLanguage').value,
+        ].join('|');
         document.getElementById('manualNarration').value = data.segments.join('\n');
     } catch (error) {
         if (error.name !== 'AbortError') alert(error.message);
@@ -82,6 +91,10 @@ function setupCoverUpload() {
 
 async function submitDecision(decision) {
     if (!state.taskId) return;
+    if (state.decisionTimer) {
+        clearTimeout(state.decisionTimer);
+        state.decisionTimer = null;
+    }
     const res = await fetch(`/api/decision/${state.taskId}`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({decision, prompt: document.getElementById('decisionPrompt').value}),
@@ -634,6 +647,11 @@ async function startProcessing() {
         manual_duration: parseFloat(document.getElementById('manualDuration').value) || 5,
         manual_durations: document.getElementById('manualDurations').value.trim(),
         manual_narration: document.getElementById('manualNarration').value,
+        ocr_results: state.ocrSignature === [
+            pageSelection,
+            document.getElementById('pagesPerSegment').value,
+            document.getElementById('ocrLanguage').value,
+        ].join('|') ? state.ocrResults : null,
         cover_mode: document.getElementById('coverMode').value,
         cover_path: state.coverPath || '',
         cover_duration: parseFloat(document.getElementById('coverDuration').value) || 3,
@@ -724,12 +742,16 @@ async function pollProgress() {
             document.getElementById('decisionMsg').textContent = data.error || data.message;
             const promptBox = document.getElementById('decisionPrompt');
             const promptMode = (data.decision_stage || '').includes('提示词');
-            promptBox.style.display = promptMode ? 'block' : 'none';
+            const ttsMode = (data.decision_stage || '').includes('TTS');
+            promptBox.style.display = (promptMode || ttsMode) ? 'block' : 'none';
             // 轮询每秒执行一次；用户获得焦点后不能再用服务端旧值覆盖正在编辑的内容。
             if (document.activeElement !== promptBox) {
                 promptBox.value = data.decision_prompt || '';
             }
-            document.getElementById('btnContinueWithoutAi').textContent = promptMode ? '修改后重新提交' : '无 AI 继续';
+            document.getElementById('btnContinueWithoutAi').textContent = promptMode ? '修改后重新提交' : (ttsMode ? '确认文本并生成配音' : '无 AI 继续');
+            if (ttsMode && !state.decisionTimer) {
+                state.decisionTimer = setTimeout(() => submitDecision('continue'), 60000);
+            }
         } else if (data.status === 'completed') {
             clearInterval(state.pollTimer);
             state.pollTimer = null;

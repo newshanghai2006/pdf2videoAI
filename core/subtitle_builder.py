@@ -6,7 +6,7 @@ import subprocess
 from config import FFPROBE_BIN
 
 
-def _duration(scene, use_tts):
+def _duration(scene, use_tts, auto_duration_tts=True):
     audio = scene.get("audio_path") if use_tts else None
     if audio and os.path.exists(audio):
         try:
@@ -15,7 +15,10 @@ def _duration(scene, use_tts):
                  "-of", "default=noprint_wrappers=1:nokey=1", audio],
                 capture_output=True, text=True, timeout=10,
             )
-            return max(1.0, float(result.stdout.strip()))
+            audio_duration = max(1.0, float(result.stdout.strip()))
+            if auto_duration_tts:
+                return max(float(scene.get("duration", 5) or 5), audio_duration)
+            return audio_duration
         except Exception:
             pass
     return max(1.0, float(scene.get("duration", 5) or 5))
@@ -29,11 +32,11 @@ def _timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def build_srt(scenes, output_path, use_tts=True):
+def build_srt(scenes, output_path, use_tts=True, auto_duration_tts=True):
     cursor = 0.0
     blocks = []
     for scene in scenes:
-        duration = _duration(scene, use_tts)
+        duration = _duration(scene, use_tts, auto_duration_tts)
         narration = str(scene.get("narration") or "").strip()
         dialogue = scene.get("dialogue") or []
         if isinstance(dialogue, str):

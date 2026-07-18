@@ -90,9 +90,13 @@ def _scene_duration(scene, use_tts, auto_duration_tts=True):
     有配音 → 取配音真实时长（不夹取，保证音画一致）；
     无配音 → 取场景建议 duration，兜底 5s。仅做一个宽松下限避免 0 时长。
     """
-    valid_audio = _valid_audio_path(scene.get("audio_path")) if use_tts and auto_duration_tts else None
-    if valid_audio:
-        dur = _get_audio_duration(valid_audio, default=scene.get("duration", 5))
+    if scene.get('is_cover'):
+        return min(MAX_SCENE_DURATION, max(1.0, float(scene.get('duration', 3) or 3)))
+    audio_path = scene.get("audio_path") if use_tts and auto_duration_tts else None
+    if audio_path and os.path.exists(audio_path):
+        # 时长读取与可解码性分开：轻微坏帧不应让片段退回手动时长。
+        audio_duration = _get_audio_duration(audio_path, default=scene.get("duration", 5))
+        dur = max(float(scene.get("duration", 5) or 5), audio_duration)
     else:
         dur = float(scene.get("duration", 5) or 5)
     # OCR/TTS 异常可能产生数百秒的单段音频；限制单段时长，避免静态 FFmpeg 长时间超时。
@@ -228,6 +232,10 @@ def build_film(scenes, output_path, width, height,
                 progress_callback(pct, f"合成场景 {i + 1}/{total}")
 
             duration = _scene_duration(scene, use_tts, auto_duration_tts)
+            scene['effective_duration'] = duration
+            if progress_callback:
+                progress_callback(int(i / total * 70),
+                                  f"合成场景 {i + 1}/{total}（{duration:.1f} 秒）")
 
             # 1) 引擎生成「时长恰为 duration」的无声画面片段
             silent = os.path.join(tmp_dir, f"silent_{i:04d}.mp4")

@@ -455,6 +455,13 @@ def run_pipeline(task_id, pdf_path, config):
             # 检查 TTS 是否成功
             tts_ok = any(s.get('audio_path') for s in scenes)
             if tts_ok:
+                if auto_duration_tts:
+                    from core.tts_engine import get_audio_duration
+                    for scene in scenes:
+                        audio_path = scene.get('audio_path')
+                        if audio_path and os.path.exists(audio_path):
+                            audio_duration = get_audio_duration(audio_path)
+                            scene['duration'] = max(float(scene.get('duration', 5) or 5), audio_duration)
                 update_task(task_id, scenes=scenes, progress=85,
                             message='配音生成完成')
             else:
@@ -465,7 +472,8 @@ def run_pipeline(task_id, pdf_path, config):
 
         # 字幕时间轴与影片使用相同的场景时长规则。
         subtitle_path = os.path.join(work_dir, 'subtitles.srt')
-        build_srt(scenes, subtitle_path, use_tts=tts_ok)
+        build_srt(scenes, subtitle_path, use_tts=tts_ok,
+                  auto_duration_tts=auto_duration_tts)
         update_task(task_id, subtitle_path=subtitle_path)
 
         # ===== 阶段6: 影片合成 =====

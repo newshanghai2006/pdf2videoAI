@@ -142,9 +142,10 @@ def _manual_scenes(ocr_results, pages_per_segment=1, duration=5.0,
     scenes = []
     for start in range(0, len(ocr_results), pages_per_segment):
         group = ocr_results[start:start + pages_per_segment]
-        text = "\n".join(x.get('text', '').strip() for x in group).strip()
+        text = " ".join(" ".join(x.get('text', '').replace('\r', ' ').replace('\n', ' ').split()) for x in group).strip()
         idx = len(scenes)
         narration = narration_lines[idx].strip() if idx < len(narration_lines) and narration_lines[idx].strip() else text
+        narration = ' '.join(narration.replace('\r', ' ').replace('\n', ' ').split())
         scene_duration = float(segment_durations[idx]) if segment_durations and idx < len(segment_durations) and segment_durations[idx] else float(duration)
         scenes.append({'scene_number': idx + 1, 'page_source': group[0]['page_num'],
                        'page_sources': [x['page_num'] for x in group],
@@ -438,10 +439,16 @@ def run_pipeline(task_id, pdf_path, config):
                 prompt=narration_prompt, timeout=180
             )
             if confirmed_text:
-                edited_lines = confirmed_text.splitlines()
+                try:
+                    edited_texts = json.loads(confirmed_text)
+                    if not isinstance(edited_texts, list):
+                        edited_texts = [confirmed_text]
+                except (TypeError, json.JSONDecodeError):
+                    # 兼容旧版前端提交的逐行文本。
+                    edited_texts = confirmed_text.splitlines()
                 for index, scene in enumerate(scenes):
-                    if index < len(edited_lines):
-                        scene['narration'] = edited_lines[index].strip()
+                    if index < len(edited_texts):
+                        scene['narration'] = str(edited_texts[index]).strip()
             update_task(task_id, phase='tts', progress=75,
                         message='正在生成旁白配音...')
             audio_dir = os.path.join(work_dir, 'audio')

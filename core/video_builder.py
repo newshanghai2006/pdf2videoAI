@@ -18,7 +18,7 @@ import shutil
 from config import FFMPEG_BIN, FFPROBE_BIN, FPS
 from .video_engines import get_engine
 
-MAX_SCENE_DURATION = 60.0
+MAX_SCENE_DURATION = 90.0
 
 
 # ===== 基础工具 =====

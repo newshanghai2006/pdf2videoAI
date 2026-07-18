@@ -76,7 +76,7 @@ async function submitDecision(decision) {
 
 function collectDecisionPrompt() {
     const fields = document.querySelectorAll('.decision-scene-prompt');
-    if (fields.length) return Array.from(fields).map(field => field.value).join('\n');
+    if (fields.length) return JSON.stringify(Array.from(fields).map(field => field.value));
     return document.getElementById('decisionPrompt').value;
 }
 

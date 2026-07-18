@@ -338,13 +338,12 @@ def run_pipeline(task_id, pdf_path, config):
             if cover_mode == 'ai':
                 from core.image_generator import generate_scene_image
                 cover_image = os.path.join(work_dir, 'cover.png')
-                cover_title = str(story.get('title') or '历史连环画').strip()
                 cover_prompt = (
                     "A striking cinematic cover image for a Chinese historical comic video, "
                     "high visual impact, dramatic lighting, clear central characters, bold composition, "
-                    "rich traditional color, intriguing mystery, polished theatrical poster art. "
-                    f"Add a large, elegant, highly legible Chinese title text: '{cover_title}'. "
-                    "Use strong title contrast and professional poster typography, with a small subtitle area. "
+                    "rich traditional color, intriguing mystery, polished theatrical poster art, "
+                    "clean poster composition with intentional empty space for a title to be added later. "
+                    "Do not generate any readable text, letters, logos, captions or symbols. "
                     "No graphic violence, suitable for a general audience."
                 )
                 try:

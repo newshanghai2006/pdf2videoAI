@@ -56,6 +56,22 @@ def _get_audio_duration(audio_path, default=5.0):
         return default
 
 
+def _get_stream_duration(media_path, stream_selector, default=0.0):
+    """Return a stream duration for diagnostics and final muxing."""
+    try:
+        result = subprocess.run(
+            [FFPROBE_BIN, "-v", "quiet", "-select_streams", stream_selector,
+             "-show_entries", "stream=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", media_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        values = [float(line.strip()) for line in result.stdout.splitlines()
+                  if line.strip()]
+        return values[0] if values and values[0] > 0 else default
+    except Exception:
+        return default
+
+
 def _valid_audio_path(audio_path):
     """确认音频存在且包含可解码的音频流。"""
     if not audio_path or not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1024:
@@ -111,6 +127,7 @@ def _mux_scene(silent_video, audio_path, out_path, duration):
     - 有配音：视频与音频等长（都等于 duration），直接对齐，无需 -shortest 截断。
     - 无配音：补一条等长静音轨，保证所有片段结构一致（都含音轨），拼接更稳。
     """
+    return _mux_scene_normalized(silent_video, audio_path, out_path, duration)
     audio_path = _valid_audio_path(audio_path)
     if audio_path:
         args = [
@@ -144,15 +161,49 @@ def _mux_scene(silent_video, audio_path, out_path, duration):
     return out_path
 
 
+def _mux_scene_normalized(silent_video, audio_path, out_path, duration):
+    """Create a zero-based, equal-duration A/V segment.
+
+    Each scene is re-encoded deliberately. Copying the silent video while
+    filtering only the audio preserves edit-list timestamps and can accumulate
+    an audible offset at concat boundaries.
+    """
+    audio_path = _valid_audio_path(audio_path)
+    duration = max(1.0, float(duration))
+    duration_text = f"{duration:.6f}"
+    audio_input = ["-i", audio_path] if audio_path else [
+        "-f", "lavfi", "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=44100",
+    ]
+    filter_complex = (
+        f"[0:v]setpts=PTS-STARTPTS,fps={FPS},"
+        f"tpad=stop_mode=clone:stop_duration={duration_text},"
+        f"trim=duration={duration_text},setpts=PTS-STARTPTS[v];"
+        f"[1:a]aresample=44100:async=1:first_pts=0,"
+        f"asetpts=PTS-STARTPTS,apad,atrim=duration={duration_text},"
+        f"asetpts=PTS-STARTPTS[a]"
+    )
+    args = [
+        "-y", "-i", silent_video, *audio_input,
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-r", str(FPS), "-fps_mode", "cfr",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        "-map_metadata", "-1", "-avoid_negative_ts", "make_zero",
+        "-t", duration_text, out_path,
+    ]
+    _run_ffmpeg(args, timeout=300)
+    return out_path
+
+
 def _concat_av_segments(seg_paths, output_path):
     """拼接多段「已含音轨」的音视频片段。
 
     统一重编码拼接（而非 -c copy），规避不同片段间时间基/关键帧差异导致的
     音画错位；音视频一起重编码，时间线保持一致。
     """
-    if len(seg_paths) == 1:
-        shutil.copy2(seg_paths[0], output_path)
-        return
+    return _concat_av_segments_filter(seg_paths, output_path)
 
     list_file = output_path + ".concat.txt"
     with open(list_file, "w", encoding="utf-8") as f:
@@ -177,8 +228,52 @@ def _concat_av_segments(seg_paths, output_path):
         _safe_remove(list_file)
 
 
+def _concat_av_segments_filter(seg_paths, output_path):
+    """Concatenate normalized segments while removing per-segment AAC padding."""
+    if not seg_paths:
+        raise RuntimeError("No video segments to concatenate")
+    filter_lines = []
+    concat_inputs = []
+    input_args = []
+    for index, path in enumerate(seg_paths):
+        input_args.extend(["-i", path])
+        duration = _get_stream_duration(path, "v:0", 1.0)
+        duration_text = f"{duration:.6f}"
+        filter_lines.append(
+            f"[{index}:v]setpts=PTS-STARTPTS,trim=duration={duration_text},"
+            f"setpts=PTS-STARTPTS[v{index}]"
+        )
+        filter_lines.append(
+            f"[{index}:a]aresample=44100,asetpts=PTS-STARTPTS,"
+            f"atrim=duration={duration_text},asetpts=PTS-STARTPTS[a{index}]"
+        )
+        concat_inputs.extend([f"[v{index}]", f"[a{index}]"])
+    filter_lines.append(
+        "".join(concat_inputs)
+        + f"concat=n={len(seg_paths)}:v=1:a=1[vout][aout]"
+    )
+    script_path = output_path + ".filter.txt"
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write(";\n".join(filter_lines))
+    args = [
+        "-y", *input_args,
+        "-filter_complex_script", script_path,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-r", str(FPS), "-fps_mode", "cfr",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        "-map_metadata", "-1", "-avoid_negative_ts", "make_zero",
+        "-video_track_timescale", "90000", output_path,
+    ]
+    try:
+        _run_ffmpeg(args, timeout=900)
+    finally:
+        _safe_remove(script_path)
+
+
 def _mix_bgm(video_path, output_path, bgm_path, bgm_volume=0.15):
     """把背景音乐混入已带配音（或静音轨）的视频。BGM 循环铺满、降到设定音量。"""
+    return _mix_bgm_normalized(video_path, output_path, bgm_path, bgm_volume)
     duration = _get_audio_duration(video_path)
     args = [
         "-y",
@@ -191,6 +286,28 @@ def _mix_bgm(video_path, output_path, bgm_path, bgm_volume=0.15):
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
         "-t", f"{duration}",
+        output_path,
+    ]
+    _run_ffmpeg(args, timeout=600)
+
+
+def _mix_bgm_normalized(video_path, output_path, bgm_path, bgm_volume=0.15):
+    """Mix BGM using the video stream as the master clock."""
+    duration = _get_stream_duration(video_path, "v:0", _get_audio_duration(video_path))
+    duration_text = f"{duration:.6f}"
+    args = [
+        "-y", "-i", video_path,
+        "-stream_loop", "-1", "-i", bgm_path,
+        "-filter_complex",
+        f"[0:a]aresample=44100,atrim=duration={duration_text}[voice];"
+        f"[1:a]volume={bgm_volume},aresample=44100,"
+        f"atrim=duration={duration_text}[bgm];"
+        f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0,"
+        f"aresample=44100:async=1:first_pts=0,atrim=duration={duration_text}[aout]",
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-ar", "44100", "-ac", "2", "-map_metadata", "-1",
+        "-avoid_negative_ts", "make_zero", "-t", duration_text,
         output_path,
     ]
     _run_ffmpeg(args, timeout=600)
@@ -251,7 +368,9 @@ def build_film(scenes, output_path, width, height,
             # 2) 贴上本场景配音（或静音轨），得到自洽同步片段
             audio_path = scene.get("audio_path") if use_tts else None
             seg = os.path.join(tmp_dir, f"seg_{i:04d}.mp4")
-            _mux_scene(silent, audio_path, seg, duration)
+            _mux_scene_normalized(silent, audio_path, seg, duration)
+            scene['rendered_video_duration'] = _get_stream_duration(seg, 'v:0', duration)
+            scene['rendered_audio_duration'] = _get_stream_duration(seg, 'a:0', duration)
             segments.append(seg)
 
         if not segments:
@@ -261,13 +380,13 @@ def build_film(scenes, output_path, width, height,
         if progress_callback:
             progress_callback(78, "拼接场景片段...")
         merged = os.path.join(tmp_dir, "merged.mp4")
-        _concat_av_segments(segments, merged)
+        _concat_av_segments_filter(segments, merged)
 
         # 4) 可选：混入背景音乐
         if bgm_path and os.path.exists(bgm_path):
             if progress_callback:
                 progress_callback(90, "混合背景音乐...")
-            _mix_bgm(merged, output_path, bgm_path, bgm_volume)
+            _mix_bgm_normalized(merged, output_path, bgm_path, bgm_volume)
         else:
             shutil.copy2(merged, output_path)
 

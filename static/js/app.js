@@ -601,6 +601,7 @@ async function startProcessing() {
         orientation: orientation,
         page_selection: pageSelection,
         use_ai_analysis: document.getElementById('useAiAnalysis').checked,
+        ocr_engine: document.getElementById('ocrEngine').value,
         ocr_language: document.getElementById('ocrLanguage').value,
         pages_per_segment: parseInt(document.getElementById('pagesPerSegment').value) || 1,
         page_layout: document.getElementById('pageLayout').value,

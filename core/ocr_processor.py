@@ -7,22 +7,44 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-import cv2
-from rapidocr_onnxruntime import RapidOCR
-
-
 # 全局 OCR 实例（避免重复加载模型）
 _ocr_engine = None
+_ocr_engine_name = None
 
 
-def get_ocr_engine(language="ch"):
+def get_ocr_engine(language="ch", engine="rapidocr"):
     """获取 OCR 引擎单例"""
-    global _ocr_engine
-    if _ocr_engine is None:
+    global _ocr_engine, _ocr_engine_name
+    engine = (engine or "rapidocr").strip().lower()
+    if engine not in ("rapidocr", "easyocr"):
+        engine = "rapidocr"
+    if _ocr_engine is not None and _ocr_engine_name == engine:
+        return _ocr_engine
+    if engine == "easyocr":
+        try:
+            import easyocr
+        except ImportError as error:
+            raise RuntimeError(
+                "EasyOCR 未安装。请执行: python -m pip install easyocr"
+            ) from error
+        languages = ["en"] if language == "en" else ["ch_sim", "en"]
+        if language == "chinese_cht":
+            languages = ["ch_tra", "en"]
+        _ocr_engine = easyocr.Reader(
+            languages, gpu=False, verbose=False, download_enabled=True,
+        )
+    else:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError as error:
+            raise RuntimeError(
+                "RapidOCR 未安装。请执行: python -m pip install rapidocr_onnxruntime"
+            ) from error
         try:
             _ocr_engine = RapidOCR(lang=language)
         except TypeError:
             _ocr_engine = RapidOCR()
+    _ocr_engine_name = engine
     return _ocr_engine
 
 
@@ -36,6 +58,7 @@ def _resize_for_ocr(image_path, max_dim=1600):
     Returns:
         tuple: (处理后的图片路径, 是否为临时文件)
     """
+    import cv2
     img = cv2.imread(image_path)
     if img is None:
         return image_path, False
@@ -55,7 +78,7 @@ def _resize_for_ocr(image_path, max_dim=1600):
     return tmp_path, True
 
 
-def ocr_image(image_path, language="ch"):
+def ocr_image(image_path, language="ch", engine="rapidocr"):
     """对单张图片进行 OCR 识别。
 
     Args:
@@ -67,18 +90,24 @@ def ocr_image(image_path, language="ch"):
             'blocks': list[dict],  # 文本块列表
         }
     """
-    engine = get_ocr_engine(language)
+    ocr_engine = get_ocr_engine(language, engine=engine)
 
     # 1200px 足够识别常见连环画文字，并显著降低 ONNX 内存占用。
     tmp_path, is_temp = _resize_for_ocr(image_path, max_dim=1200)
 
     try:
         try:
-            result, _ = engine(tmp_path)
+            if (engine or "rapidocr").lower() == "easyocr":
+                result = ocr_engine.readtext(tmp_path, detail=1, paragraph=False)
+            else:
+                result, _ = ocr_engine(tmp_path)
         except Exception as first_error:
             retry_path, retry_temp = _resize_for_ocr(image_path, max_dim=800)
             try:
-                result, _ = engine(retry_path)
+                if (engine or "rapidocr").lower() == "easyocr":
+                    result = ocr_engine.readtext(retry_path, detail=1, paragraph=False)
+                else:
+                    result, _ = ocr_engine(retry_path)
             except Exception as retry_error:
                 raise RuntimeError(
                     "OCR 推理失败。已限制 ONNX/OpenBLAS 线程并使用 800px 图片重试；"
@@ -100,7 +129,7 @@ def ocr_image(image_path, language="ch"):
             # item: [box_coords, text, confidence]
             box = item[0]
             text = str(item[1]).strip()
-            conf = float(item[2])
+            conf = float(item[2]) if len(item) > 2 else 1.0
 
             if text and conf > 0.3:
                 # 计算文本块中心位置
@@ -133,7 +162,7 @@ def ocr_image(image_path, language="ch"):
                 pass
 
 
-def ocr_pages(image_paths, progress_callback=None, language="ch"):
+def ocr_pages(image_paths, progress_callback=None, language="ch", engine="rapidocr"):
     """对多张页面图片进行 OCR 识别。
 
     Args:
@@ -147,7 +176,7 @@ def ocr_pages(image_paths, progress_callback=None, language="ch"):
     results = []
 
     for i, path in enumerate(image_paths):
-        result = ocr_image(path, language=language)
+        result = ocr_image(path, language=language, engine=engine)
         results.append({
             'page_num': i + 1,
             'image_path': path,

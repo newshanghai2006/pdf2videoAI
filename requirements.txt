@@ -7,5 +7,7 @@ Pillow>=10.0
 opencv-python>=4.8
 numpy>=1.24
 rapidocr-onnxruntime>=1.2
+# Optional alternative OCR engine (install separately when selected in UI):
+# easyocr>=1.7
 openai>=1.0
 edge-tts>=6.1

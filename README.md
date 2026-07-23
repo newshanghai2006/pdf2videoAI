@@ -29,10 +29,10 @@ PDF 连环画
 | 组件 | 要求 |
 |------|------|
 | 操作系统 | Windows / macOS / Linux 均可 |
-| Python | 3.10+（建议用项目内隔离 venv） |
+| Python | 3.10+（OCR 引擎按已安装库选择；Python 3.14 可使用 EasyOCR，RapidOCR 需匹配可用的 ONNXRuntime 版本） |
 | ffmpeg | 需在系统 PATH 中可用（`ffmpeg -version` 能跑通即可） |
 | 中文字体 | 可选，当前管线未做文字叠加；如需可自行安装系统中文字体 |
-| 网络 | 需访问 OpenAI（或兼容代理）API；TTS 需访问微软服务 |
+| 网络 | 需访问 OpenAI（或兼容代理）API；TTS 需访问微软服务；EasyOCR 首次运行需下载模型 |
 
 > 依赖里的 **PyMuPDF** 会被装进 venv，PDF 渲染默认在进程内完成，**无需任何额外的系统 Python**。
 > （仅在极少数机器上原生 DLL 被安全软件极慢扫描时，才需要用到下方“疑难解答”里的可选后备方案。）
@@ -289,6 +289,24 @@ AI 理解或 AI 生图失败时，任务会暂停并显示“无 AI 继续”和
 ---
 
 ## TTS 语音选项
+
+### OCR 引擎选择
+
+界面可在 `RapidOCR（ONNX）` 和 `EasyOCR` 之间选择。RapidOCR 已列入默认依赖；EasyOCR 为可选依赖，
+需要在项目虚拟环境中单独安装：
+
+```powershell
+python -m pip --python .venv\Scripts\python.exe install easyocr
+```
+
+OCR 引擎只在 OCR 阶段按选择加载，不会在 Flask 启动时同时导入所有引擎。EasyOCR 首次使用可能下载模型，
+RapidOCR 则要求 `rapidocr_onnxruntime` 与当前 Python/ONNXRuntime 版本匹配。
+
+Windows 的 `install.bat` 使用 `venv --without-pip` 创建项目环境，再通过系统 pip 的 `--python`
+选项把依赖安装到 `.venv`。这是为了绕过部分 Python 3.14 + Windows Python Manager 环境中
+`ensurepip` 长时间无响应的问题；该 `.venv` 不要求自身先安装 pip，`run.bat` 可直接启动应用。
+安装依赖阶段会显示 pip 下载/解析信息，并设置有限的网络超时和重试次数；如果网络不可达会明确失败，
+不会继续无限停留在虚拟环境创建提示。
 
 | 语音 ID | 名称 | 特点 |
 |---------|------|------|
@@ -551,11 +569,13 @@ TTS 依赖微软在线服务。如果网络不通，系统会自动降级为无�
 - 扫描质量差的页面识别率会下降
 - 系统已针对中文优化（RapidOCR + 中文模型）
 
-### Q: 出现 `ONNXRuntime inferece failed`？
+### Q: 任务一直显示 0%，或出现 `ONNXRuntime inferece failed`？
 
-这是本地 RapidOCR/ONNXRuntime 推理时的内存或运行时错误。程序已限制 OpenBLAS/ONNX
-线程数，将 OCR 输入缩放到最大 1200px，并在失败时自动使用 800px 图片重试。修改后需要
-完全停止并重新启动服务，确保线程环境变量在 ONNXRuntime 导入前生效。
+如果任务目录尚未创建、FFmpeg 进程也不存在，通常卡在 OCR 引擎加载，而不是视频合成。
+程序支持在界面选择 `RapidOCR` 或 `EasyOCR`，并且只在真正需要 OCR 时加载所选引擎；Python 3.14
+可以使用 EasyOCR，但 RapidOCR 是否可用取决于本机 `rapidocr_onnxruntime` 与 ONNXRuntime 的匹配版本。
+如果某个引擎加载无响应，可切换另一个引擎；也可以在 Python 3.10/3.11 的独立 venv 中安装对应依赖。
+OCR 推理阶段会限制 OpenBLAS/ONNX 线程数，将输入缩放到最大 1200px，并在失败时使用 800px 图片重试。
 
 ### Q: 生成速度慢？
 

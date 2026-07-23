@@ -195,11 +195,15 @@ def run_pipeline(task_id, pdf_path, config):
         bgm_path, bgm_volume
     """
     try:
+        # Report module initialization before importing OCR/ONNXRuntime. On
+        # incompatible Python runtimes that import can take a long time, and
+        # leaving the task at 0% makes it look as though the request failed.
+        update_task(task_id, status='running', phase='init', progress=1,
+                    message='正在加载处理组件（首次加载 OCR/ONNXRuntime 可能需要一些时间）...')
         import sys
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
         from core.pdf_processor import extract_pages
-        from core.ocr_processor import ocr_pages
         from core.story_analyzer import analyze_story
         from core.image_generator import generate_all_scenes
         from core.image_generator import colorize_pages
@@ -224,6 +228,9 @@ def run_pipeline(task_id, pdf_path, config):
             page_layout = 'horizontal' if orientation == 'landscape' else 'vertical'
         use_ai_analysis = config.get('use_ai_analysis', True)
         ocr_language = config.get('ocr_language', 'ch')
+        ocr_engine = config.get('ocr_engine', 'rapidocr').strip().lower()
+        if ocr_engine not in ('rapidocr', 'easyocr'):
+            ocr_engine = 'rapidocr'
         # 手动模式必须由页数组合控制场景边界，避免服务商预设自动开启 AI 生图
         # 后重新按单个 scene 生成画面，导致 N 页设置看起来失效。
         if not use_ai_analysis:
@@ -269,15 +276,19 @@ def run_pipeline(task_id, pdf_path, config):
 
         # ===== 阶段2: OCR 文字识别 =====
         update_task(task_id, phase='ocr', progress=12,
-                    message='正在OCR识别文字...')
+                    message='正在加载 OCR/ONNXRuntime 并识别文字...')
         cached_ocr = config.get('ocr_results')
         if cached_ocr and isinstance(cached_ocr, list):
             ocr_results = cached_ocr
             update_task(task_id, progress=25, message='已复用预览阶段 OCR 结果')
         else:
+            # Load RapidOCR only when OCR is actually needed. This keeps
+            # manual runs with cached preview text from importing ONNXRuntime.
+            from core.ocr_processor import ocr_pages
             ocr_results = ocr_pages(
                 page_images,
                 language=ocr_language,
+                engine=ocr_engine,
                 progress_callback=lambda c, t, m: update_task(
                     task_id, progress=12 + int(c / t * 13), message=m)
             )
@@ -652,7 +663,11 @@ def ocr_preview():
             images = extract_pages(pdf_path, work, start_page=min(pages), end_page=max(pages))
             wanted = {p: os.path.join(work, f'page_{p:04d}.png') for p in pages}
             images = [wanted[p] for p in pages if os.path.exists(wanted[p])]
-            results = ocr_pages(images, language=data.get('ocr_language', 'ch'))
+            results = ocr_pages(
+                images,
+                language=data.get('ocr_language', 'ch'),
+                engine=data.get('ocr_engine', 'rapidocr'),
+            )
             size = max(1, int(data.get('pages_per_segment', 1) or 1))
             segments = ['\n'.join(r.get('text', '').strip() for r in results[i:i + size]).strip()
                         for i in range(0, len(results), size)]
@@ -700,6 +715,7 @@ def start_process():
         'page_layout': data.get('page_layout', 'auto').strip(),
         'use_ai_analysis': use_ai_analysis,
         'ocr_language': data.get('ocr_language', 'ch').strip(),
+        'ocr_engine': data.get('ocr_engine', 'rapidocr').strip().lower(),
         'pages_per_segment': int(data.get('pages_per_segment', 1) or 1),
         'manual_duration': float(data.get('manual_duration', 5) or 5),
         'manual_durations': data.get('manual_durations', '').strip(),

@@ -271,6 +271,106 @@ def _concat_av_segments_filter(seg_paths, output_path):
         _safe_remove(script_path)
 
 
+def _concat_video_segments_filter(seg_paths, durations, output_path):
+    """Concatenate silent video segments using the requested scene durations.
+
+    Audio is deliberately kept out of this pass.  Encoding AAC independently
+    for every scene introduces encoder priming at each boundary; that becomes
+    audible as drift when a silent cover is prepended.  The audio timeline is
+    built once in ``_mux_scene_audio`` below.
+    """
+    if not seg_paths:
+        raise RuntimeError("No video segments to concatenate")
+    if len(seg_paths) != len(durations):
+        raise RuntimeError("Video segment/duration count mismatch")
+
+    filter_lines = []
+    input_args = []
+    concat_inputs = []
+    for index, (path, duration) in enumerate(zip(seg_paths, durations)):
+        input_args.extend(["-i", path])
+        duration_text = f"{max(1.0, float(duration)):.6f}"
+        filter_lines.append(
+            f"[{index}:v]setpts=PTS-STARTPTS,fps={FPS},"
+            f"tpad=stop_mode=clone:stop_duration={duration_text},"
+            f"trim=duration={duration_text},setpts=PTS-STARTPTS[v{index}]"
+        )
+        concat_inputs.append(f"[v{index}]")
+    filter_lines.append(
+        "".join(concat_inputs)
+        + f"concat=n={len(seg_paths)}:v=1:a=0[vout]"
+    )
+    script_path = output_path + ".filter.txt"
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write(";\n".join(filter_lines))
+    args = [
+        "-y", *input_args,
+        "-filter_complex_script", script_path,
+        "-map", "[vout]",
+        "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-r", str(FPS), "-fps_mode", "cfr",
+        "-map_metadata", "-1", "-avoid_negative_ts", "make_zero",
+        "-video_track_timescale", "90000", output_path,
+    ]
+    try:
+        _run_ffmpeg(args, timeout=900)
+    finally:
+        _safe_remove(script_path)
+
+
+def _mux_scene_audio(video_path, scenes, durations, output_path, use_tts=True):
+    """Mux one continuous scene audio timeline onto the concatenated video.
+
+    All scene audio is decoded and concatenated before the single AAC encode.
+    Cover scenes and scenes without TTS use generated PCM silence of exactly
+    the scene duration, so the cover never changes the narration start time.
+    """
+    if len(scenes) != len(durations):
+        raise RuntimeError("Scene/duration count mismatch")
+
+    input_args = ["-i", video_path]
+    filter_lines = []
+    audio_labels = []
+    for index, (scene, duration) in enumerate(zip(scenes, durations), start=1):
+        audio_path = _valid_audio_path(scene.get("audio_path")) if use_tts else None
+        if audio_path:
+            input_args.extend(["-i", audio_path])
+        else:
+            input_args.extend([
+                "-f", "lavfi", "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=44100",
+            ])
+        duration_text = f"{max(1.0, float(duration)):.6f}"
+        filter_lines.append(
+            f"[{index}:a]aresample=44100:async=1:first_pts=0,"
+            f"asetpts=PTS-STARTPTS,apad,atrim=duration={duration_text},"
+            f"asetpts=PTS-STARTPTS[a{index}]"
+        )
+        audio_labels.append(f"[a{index}]")
+    filter_lines.append(
+        "".join(audio_labels)
+        + f"concat=n={len(scenes)}:v=0:a=1[aout]"
+    )
+    script_path = output_path + ".filter.txt"
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write(";\n".join(filter_lines))
+    total_duration = sum(max(1.0, float(d)) for d in durations)
+    total_text = f"{total_duration:.6f}"
+    args = [
+        "-y", *input_args,
+        "-filter_complex_script", script_path,
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-ar", "44100", "-ac", "2", "-t", total_text,
+        "-map_metadata", "-1", "-avoid_negative_ts", "make_zero",
+        "-muxdelay", "0", "-muxpreload", "0", output_path,
+    ]
+    try:
+        _run_ffmpeg(args, timeout=900)
+    finally:
+        _safe_remove(script_path)
+
+
 def _mix_bgm(video_path, output_path, bgm_path, bgm_volume=0.15):
     """把背景音乐混入已带配音（或静音轨）的视频。BGM 循环铺满、降到设定音量。"""
     return _mix_bgm_normalized(video_path, output_path, bgm_path, bgm_volume)
@@ -339,6 +439,8 @@ def build_film(scenes, output_path, width, height,
 
     try:
         segments = []
+        rendered_scenes = []
+        scene_durations = []
         for i, scene in enumerate(scenes):
             image_path = scene.get("image_path")
             if not image_path or not os.path.exists(image_path):
@@ -366,12 +468,13 @@ def build_film(scenes, output_path, width, height,
             )
 
             # 2) 贴上本场景配音（或静音轨），得到自洽同步片段
-            audio_path = scene.get("audio_path") if use_tts else None
-            seg = os.path.join(tmp_dir, f"seg_{i:04d}.mp4")
-            _mux_scene_normalized(silent, audio_path, seg, duration)
-            scene['rendered_video_duration'] = _get_stream_duration(seg, 'v:0', duration)
-            scene['rendered_audio_duration'] = _get_stream_duration(seg, 'a:0', duration)
-            segments.append(seg)
+            # Keep video-only segments. Audio is concatenated once below so
+            # AAC encoder priming cannot accumulate at scene boundaries.
+            segments.append(silent)
+            rendered_scenes.append(scene)
+            scene_durations.append(duration)
+            scene['rendered_video_duration'] = duration
+            scene['rendered_audio_duration'] = duration if use_tts else 0.0
 
         if not segments:
             raise RuntimeError("没有可用的场景画面")
@@ -379,8 +482,10 @@ def build_film(scenes, output_path, width, height,
         # 3) 拼接所有自洽片段
         if progress_callback:
             progress_callback(78, "拼接场景片段...")
+        merged_video = os.path.join(tmp_dir, "merged_video.mp4")
+        _concat_video_segments_filter(segments, scene_durations, merged_video)
         merged = os.path.join(tmp_dir, "merged.mp4")
-        _concat_av_segments_filter(segments, merged)
+        _mux_scene_audio(merged_video, rendered_scenes, scene_durations, merged, use_tts=use_tts)
 
         # 4) 可选：混入背景音乐
         if bgm_path and os.path.exists(bgm_path):

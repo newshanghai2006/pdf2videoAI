@@ -97,7 +97,7 @@ def _error_message(error, base_url, model):
     return f"{prefix}: {type(error).__name__}: {error}"
 
 
-def _normalize_batch_page_sources(scenes, batch_pages):
+def _normalize_batch_page_sources(scenes, batch_pages, empty_pages=None):
     """把一个 LLM 批次的场景页码绑定到该批真实 PDF 页码。
 
     模型有时会忽略输入中的绝对页码，在每个批次都返回 1、2、3，或者
@@ -108,6 +108,34 @@ def _normalize_batch_page_sources(scenes, batch_pages):
     """
     if not scenes or not batch_pages:
         return scenes
+    empty_pages = set(empty_pages or ())
+
+    # LLMs commonly omit scanned cover pages with no OCR text. In that case
+    # the returned scene count matches the non-empty pages, so bind by the
+    # non-empty page sequence and let the caller insert explicit blank scenes.
+    non_empty_pages = [page for page in batch_pages if page not in empty_pages]
+    if empty_pages and len(scenes) == len(non_empty_pages):
+        for index, scene in enumerate(scenes):
+            page = non_empty_pages[index]
+            scene['page_sources'] = [page]
+            scene['page_source'] = page
+            scene['scene_number'] = index + 1
+        return scenes
+
+    # If the model did return one scene for every page, the input order is the
+    # only reliable mapping for an empty page; clear any accidental narration
+    # attached to that page below.
+    if empty_pages and len(scenes) == len(batch_pages):
+        for index, scene in enumerate(scenes):
+            page = batch_pages[index]
+            scene['page_sources'] = [page]
+            scene['page_source'] = page
+            scene['scene_number'] = index + 1
+            if page in empty_pages:
+                scene['narration'] = ''
+                scene['dialogue'] = []
+        return scenes
+
     allowed = set(batch_pages)
     claimed = []
     valid = True
@@ -188,6 +216,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
             _normalize_batch_page_sources(
                 part.get('scenes', []),
                 [int(item['page_num']) for item in batch],
+                empty_pages={int(item['page_num']) for item in batch
+                             if not str(item.get('text') or '').strip()},
             )
             if not merged['title']:
                 merged['title'] = part.get('title', '')
@@ -215,10 +245,12 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
     pages_text = []
     for r in ocr_results:
         page_text = r['text'].strip()
-        if page_text:
-            pages_text.append(f"【第{r['page_num']}页】\n{page_text}")
+        pages_text.append(
+            f"【第{r['page_num']}页】\n"
+            f"{page_text or '（本页无可识别文字，必须保留为无旁白画面）'}"
+        )
 
-    if not pages_text:
+    if not any(r['text'].strip() for r in ocr_results):
         raise ValueError("OCR 未识别到任何文字，无法进行AI分析")
 
     full_text = "\n\n".join(pages_text)
@@ -302,6 +334,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
     _normalize_batch_page_sources(
         result.get('scenes', []),
         [int(item['page_num']) for item in ocr_results],
+        empty_pages={int(item['page_num']) for item in ocr_results
+                     if not str(item.get('text') or '').strip()},
     )
     return result
 

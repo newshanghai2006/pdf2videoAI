@@ -309,6 +309,13 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
         out_path = os.path.join(output_dir, f"scene_{i + 1:04d}.png")
         prompt = scene.get('image_prompt', 'A beautiful Chinese historical scene')
 
+        if scene.get('is_pdf_cover'):
+            scene['image_path'] = scene.get('source_image_path')
+            if progress_callback:
+                progress_callback(i + 1, total, f"PDF 封面保留原图 {i + 1}/{total}",
+                                  scene.get('image_path'))
+            continue
+
         if progress_callback:
             progress_callback(i, total, f"AI生成画面 {i + 1}/{total}", None)
 

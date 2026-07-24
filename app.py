@@ -225,6 +225,57 @@ def _ensure_ai_page_coverage(scenes, ocr_results):
     return result, missing
 
 
+def _force_pdf_cover_scene(scenes, cover_record, duration=3.0):
+    """把所选第一页强制变为独立、无旁白的原 PDF 封面场景。"""
+    page = int(cover_record['page_num'])
+    cover_scene = None
+    insert_at = 0
+    for index, scene in enumerate(scenes):
+        refs = scene.get('page_sources') or [scene.get('page_source')]
+        normalized = []
+        for value in refs:
+            try:
+                normalized.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if page not in normalized:
+            continue
+        insert_at = index
+        if len(normalized) == 1:
+            cover_scene = scene
+        else:
+            remaining = [value for value in normalized if value != page]
+            scene['page_sources'] = remaining
+            scene['page_source'] = remaining[0]
+        break
+
+    if cover_scene is None:
+        cover_scene = {
+            'scene_number': 0,
+            'page_source': page,
+            'page_sources': [page],
+            'narration': '',
+            'dialogue': [],
+            'image_prompt': '',
+            'mood': 'calm',
+            'duration': max(1.0, float(duration or 3)),
+        }
+        scenes.insert(insert_at, cover_scene)
+
+    cover_scene.update({
+        'page_source': page,
+        'page_sources': [page],
+        'narration': '',
+        'dialogue': [],
+        'image_prompt': '',
+        'is_pdf_cover': True,
+        'duration': max(1.0, float(duration or cover_scene.get('duration', 3) or 3)),
+    })
+    for index, scene in enumerate(scenes, 1):
+        scene['scene_number'] = index
+    return scenes
+
+
 def _apply_confirmed_narrations(scenes, confirmed_text):
     """按显式场景索引写回伴读文字，封面始终保持无旁白。"""
     if confirmed_text:
@@ -241,21 +292,24 @@ def _apply_confirmed_narrations(scenes, confirmed_text):
                     index = int(item.get('scene_index'))
                 except (TypeError, ValueError):
                     continue
-                if 0 <= index < len(scenes) and not scenes[index].get('is_cover'):
+                if (0 <= index < len(scenes)
+                        and not scenes[index].get('is_cover')
+                        and not scenes[index].get('is_pdf_cover')):
                     scenes[index]['narration'] = str(item.get('narration') or '').strip()
         elif len(edited_texts) == len(scenes):
             for index, scene in enumerate(scenes):
-                if not scene.get('is_cover'):
+                if not scene.get('is_cover') and not scene.get('is_pdf_cover'):
                     scene['narration'] = str(edited_texts[index]).strip()
         else:
             # Legacy clients may omit the leading blank cover entry.
-            content_scenes = [scene for scene in scenes if not scene.get('is_cover')]
+            content_scenes = [scene for scene in scenes
+                              if not scene.get('is_cover') and not scene.get('is_pdf_cover')]
             for index, scene in enumerate(content_scenes):
                 if index < len(edited_texts):
                     scene['narration'] = str(edited_texts[index]).strip()
 
     for scene in scenes:
-        if scene.get('is_cover'):
+        if scene.get('is_cover') or scene.get('is_pdf_cover'):
             scene['narration'] = ''
     return scenes
 
@@ -360,6 +414,7 @@ def run_pipeline(task_id, pdf_path, config):
         cover_mode = config.get('cover_mode', 'none')
         cover_path = config.get('cover_path', '')
         cover_duration = max(1.0, float(config.get('cover_duration', 3) or 3))
+        first_page_is_cover = bool(config.get('first_page_is_cover', True))
         auto_duration_tts = config.get('auto_duration_tts', True)
 
         width, height = RESOLUTIONS.get(resolution, (1920, 1080))
@@ -399,30 +454,46 @@ def run_pipeline(task_id, pdf_path, config):
                     task_id, progress=12 + int(c / t * 13), message=m)
             )
 
+        # OCR can recognize a book title on the scanned PDF cover. When the
+        # user marks the first selected page as a cover, hide that OCR text
+        # from story analysis so page 2 narration cannot slide onto page 1.
+        analysis_ocr_results = [dict(item) for item in ocr_results]
+        if first_page_is_cover and analysis_ocr_results:
+            analysis_ocr_results[0]['text'] = ''
+            analysis_ocr_results[0]['blocks'] = []
+        story_ocr_results = (
+            analysis_ocr_results[1:]
+            if first_page_is_cover and analysis_ocr_results
+            else analysis_ocr_results
+        )
+
         # ===== 阶段3: AI 剧情分析或手动分段 =====
         update_task(task_id, phase='analyze', progress=28,
                     message='AI正在理解剧情和台词...' if use_ai_analysis else '正在按手动参数组织场景...')
         if use_ai_analysis:
             try:
-                story = analyze_story(ocr_results, art_style=art_style, api_key=api_key,
-                                      base_url=base_url, llm_model=llm_model or None,
-                                      progress_callback=lambda c, t, m: update_task(
-                                          task_id, progress=28 + int(c / (t or 1) * 7), message=m))
+                if story_ocr_results:
+                    story = analyze_story(story_ocr_results, art_style=art_style, api_key=api_key,
+                                          base_url=base_url, llm_model=llm_model or None,
+                                          progress_callback=lambda c, t, m: update_task(
+                                              task_id, progress=28 + int(c / (t or 1) * 7), message=m))
+                else:
+                    story = {'title': 'PDF 封面', 'scenes': []}
             except Exception as error:
                 wait_for_decision(task_id, 'AI 理解', error)
                 story = {'title': 'AI 分析降级', 'scenes': _manual_scenes(
-                    ocr_results, config.get('pages_per_segment', 1),
+                    story_ocr_results, config.get('pages_per_segment', 1),
                     config.get('manual_duration', 5))}
         else:
             lines = config.get('manual_narration', '').splitlines()
             durations = [x.strip() for x in config.get('manual_durations', '').split(',') if x.strip()]
             story = {'title': '手动分段', 'scenes': _manual_scenes(
-                ocr_results, config.get('pages_per_segment', 1),
+                story_ocr_results, config.get('pages_per_segment', 1),
                 config.get('manual_duration', 5), lines, durations)}
             expected_segments = (len(page_images) + max(1, int(config.get('pages_per_segment', 1) or 1)) - 1) // max(1, int(config.get('pages_per_segment', 1) or 1))
             if len(story['scenes']) != expected_segments:
                 story['scenes'] = _manual_scenes(
-                    ocr_results[:len(page_images)], config.get('pages_per_segment', 1),
+                    story_ocr_results[:len(page_images)], config.get('pages_per_segment', 1),
                     config.get('manual_duration', 5), lines, durations)
             update_task(task_id, message=(
                 f"手动分段完成：实际提取 {len(page_images)} 页，生成 {len(story['scenes'])} 个视频段，"
@@ -430,7 +501,7 @@ def run_pipeline(task_id, pdf_path, config):
 
         scenes = story.get('scenes', [])
         if use_ai_analysis:
-            scenes, missing_pages = _ensure_ai_page_coverage(scenes, ocr_results)
+            scenes, missing_pages = _ensure_ai_page_coverage(scenes, story_ocr_results)
             if missing_pages:
                 story['scenes'] = scenes
                 update_task(
@@ -440,6 +511,10 @@ def run_pipeline(task_id, pdf_path, config):
                         "已自动补齐对应场景"
                     ),
                 )
+        if first_page_is_cover and analysis_ocr_results:
+            _force_pdf_cover_scene(
+                scenes, analysis_ocr_results[0], duration=cover_duration,
+            )
         update_task(task_id, scenes=scenes, progress=36,
                     message=f'剧情分析完成，共{len(scenes)}个场景')
 
@@ -556,6 +631,14 @@ def run_pipeline(task_id, pdf_path, config):
                                   'narration': '', 'dialogue': [], 'duration': cover_duration,
                                   'image_path': cover_image, 'is_cover': True})
                 update_task(task_id, scenes=scenes, message='片头封面已加入影片')
+            else:
+                update_task(
+                    task_id,
+                    message=(
+                        '已选择片头封面，但封面文件未生成或不存在；'
+                        '本次将从 PDF 第 1 页开始，未插入封面'
+                    ),
+                )
         update_task(task_id, scenes=scenes, progress=73,
                     message='全部画面生成完成')
 
@@ -832,6 +915,7 @@ def start_process():
         'cover_mode': data.get('cover_mode', 'none').strip(),
         'cover_path': data.get('cover_path', '').strip(),
         'cover_duration': float(data.get('cover_duration', 3) or 3),
+        'first_page_is_cover': bool(data.get('first_page_is_cover', True)),
         'auto_duration_tts': bool(data.get('auto_duration_tts', True)),
         'use_tts': data.get('use_tts', True),
         'tts_voice': data.get('tts_voice', 'zh-CN-YunxiNeural'),

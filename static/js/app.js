@@ -614,6 +614,7 @@ async function startProcessing() {
         cover_mode: document.getElementById('coverMode').value,
         cover_path: state.coverPath || '',
         cover_duration: parseFloat(document.getElementById('coverDuration').value) || 3,
+        first_page_is_cover: document.getElementById('firstPageIsCover').checked,
         use_tts: document.getElementById('useTts').checked,
         auto_duration_tts: document.getElementById('autoDurationTts').checked,
         tts_voice: document.getElementById('ttsVoice').value,
@@ -721,10 +722,12 @@ async function pollProgress() {
                         <div class="decision-scene-item">
                             <div class="decision-scene-title">${scene.is_cover
                                 ? '片头封面（无旁白）'
+                                : scene.is_pdf_cover
+                                    ? `PDF 封面（第 ${scene.page_source} 页，无旁白）`
                                 : `场景 ${scene.scene_number || index + 1}（PDF 第 ${(scene.page_sources || [scene.page_source]).join(',')} 页）`}</div>
                             <img class="decision-scene-image" src="/api/scene_image/${state.taskId}/${index}" alt="场景 ${index + 1}">
                             <textarea class="input decision-scene-prompt" data-scene-index="${index}" rows="4"
-                                ${scene.is_cover ? 'disabled aria-label="片头封面无旁白"' : ''}>${escapeHtml(scene.is_cover ? '' : (scene.narration || ''))}</textarea>
+                                ${(scene.is_cover || scene.is_pdf_cover) ? 'disabled aria-label="封面无旁白"' : ''}>${escapeHtml((scene.is_cover || scene.is_pdf_cover) ? '' : (scene.narration || ''))}</textarea>
                         </div>`).join('');
                     sceneEditor.querySelectorAll('.decision-scene-prompt').forEach(field => {
                         const stopCountdown = () => {
@@ -827,6 +830,8 @@ function updateGallery(taskId, scenes) {
         info.innerHTML = `
             <p class="gallery-item-num">${scene.is_cover
                 ? '片头封面'
+                : scene.is_pdf_cover
+                    ? `PDF 封面 · 第 ${scene.page_source} 页`
                 : `场景 ${scene.scene_number || i + 1} · PDF 第 ${(scene.page_sources || [scene.page_source]).join(',')} 页`}</p>
             <p class="gallery-item-mood">${scene.mood || ''}</p>
             <p class="gallery-item-narration">${(scene.narration || '').substring(0, 80)}...</p>

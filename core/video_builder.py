@@ -106,7 +106,7 @@ def _scene_duration(scene, use_tts, auto_duration_tts=True):
     有配音 → 取配音真实时长（不夹取，保证音画一致）；
     无配音 → 取场景建议 duration，兜底 5s。仅做一个宽松下限避免 0 时长。
     """
-    if scene.get('is_cover'):
+    if scene.get('is_cover') or scene.get('is_pdf_cover'):
         return min(MAX_SCENE_DURATION, max(1.0, float(scene.get('duration', 3) or 3)))
     audio_path = scene.get("audio_path") if use_tts and auto_duration_tts else None
     if audio_path and os.path.exists(audio_path):

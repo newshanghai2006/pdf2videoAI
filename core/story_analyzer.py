@@ -102,8 +102,9 @@ def _normalize_batch_page_sources(scenes, batch_pages):
 
     模型有时会忽略输入中的绝对页码，在每个批次都返回 1、2、3，或者
     跳过一个页码。若直接合并这些结果，后面的图片和旁白会整体错位。
-    对完全有效且不重复的页码保留模型结果；否则按批次页序均匀分配，
-    允许一个场景通过 ``page_sources`` 表示多页。
+    只有一页一场景、页码有效且不重复时才保留模型结果；否则按批次
+    页序重新绑定。缺少的页由上层用该页 OCR 文本新增独立场景，禁止
+    把两页合并进同一张场景图片。
     """
     if not scenes or not batch_pages:
         return scenes
@@ -120,11 +121,11 @@ def _normalize_batch_page_sources(scenes, batch_pages):
                 continue
             if page in allowed and page not in current:
                 current.append(page)
-        if not current or any(page in claimed for page in current):
+        if len(current) != 1 or any(page in claimed for page in current):
             valid = False
             break
         claimed.extend(current)
-    if valid and set(claimed) == allowed:
+    if valid:
         for scene in scenes:
             refs = scene.get('page_sources') or [scene.get('page_source')]
             refs = [int(value) for value in refs if str(value).lstrip('-').isdigit()]
@@ -137,15 +138,15 @@ def _normalize_batch_page_sources(scenes, batch_pages):
             scene['scene_number'] = index
         return scenes
 
-    # The returned scene count may be smaller because the model intentionally
-    # merged adjacent pages. Distribute the real pages without dropping any.
-    count = len(scenes)
+    # Bind at most one real page to each returned scene. Any pages left over
+    # remain unclaimed so app._ensure_ai_page_coverage can create independent
+    # OCR-backed scenes for them instead of combining page images.
+    if len(scenes) > len(batch_pages):
+        del scenes[len(batch_pages):]
     for index, scene in enumerate(scenes):
-        start = round(index * len(batch_pages) / count)
-        end = round((index + 1) * len(batch_pages) / count)
-        refs = batch_pages[start:end] or [batch_pages[min(start, len(batch_pages) - 1)]]
-        scene['page_sources'] = refs
-        scene['page_source'] = refs[0]
+        page = batch_pages[min(index, len(batch_pages) - 1)]
+        scene['page_sources'] = [page]
+        scene['page_source'] = page
         scene['scene_number'] = index + 1
     return scenes
 
@@ -227,7 +228,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 你的任务：
 1. 阅读并理解所有OCR识别的文字（可能有不准确之处，请根据上下文推断修正）
 2. 理解故事情节、角色关系、对话内容和战争场景
-3. 将故事拆分为若干场景（每个场景对应一个画面）
+3. 严格按输入 PDF 页拆分场景：每一页对应一个场景，不得漏页、合并页或把一页拆成多个场景
 4. 为每个场景编写旁白文字（用于配音）
 5. 为每个场景生成详细的英文画面提示词（用于AI图像生成）
 
@@ -252,7 +253,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 }}
 
 注意事项：
-- 场景数量应与输入页数大致相当（每页1-2个场景）
+- 场景数量必须与输入页数相同，每页严格一个场景；page_source 必须填写该页输入中显示的真实页码
 - image_prompt 必须是英文，描述要详细具体，包含人物外貌、动作、场景环境、光影效果
 - narration 是中文旁白，用于配音，应当流畅自然，像讲故事一样
 - 如果OCR文字不完整，请根据上下文和常识合理推断补充

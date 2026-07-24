@@ -76,7 +76,10 @@ async function submitDecision(decision) {
 
 function collectDecisionPrompt() {
     const fields = document.querySelectorAll('.decision-scene-prompt');
-    if (fields.length) return JSON.stringify(Array.from(fields).map(field => field.value));
+    if (fields.length) return JSON.stringify(Array.from(fields).map(field => ({
+        scene_index: Number(field.dataset.sceneIndex),
+        narration: field.disabled ? '' : field.value,
+    })));
     return document.getElementById('decisionPrompt').value;
 }
 
@@ -716,9 +719,12 @@ async function pollProgress() {
                     sceneEditor.dataset.taskId = state.taskId;
                     sceneEditor.innerHTML = (data.scenes || []).map((scene, index) => `
                         <div class="decision-scene-item">
-                            <div class="decision-scene-title">场景 ${index + 1}</div>
+                            <div class="decision-scene-title">${scene.is_cover
+                                ? '片头封面（无旁白）'
+                                : `场景 ${scene.scene_number || index + 1}（PDF 第 ${(scene.page_sources || [scene.page_source]).join(',')} 页）`}</div>
                             <img class="decision-scene-image" src="/api/scene_image/${state.taskId}/${index}" alt="场景 ${index + 1}">
-                            <textarea class="input decision-scene-prompt" rows="4">${escapeHtml(scene.narration || '')}</textarea>
+                            <textarea class="input decision-scene-prompt" data-scene-index="${index}" rows="4"
+                                ${scene.is_cover ? 'disabled aria-label="片头封面无旁白"' : ''}>${escapeHtml(scene.is_cover ? '' : (scene.narration || ''))}</textarea>
                         </div>`).join('');
                     sceneEditor.querySelectorAll('.decision-scene-prompt').forEach(field => {
                         const stopCountdown = () => {
@@ -819,7 +825,9 @@ function updateGallery(taskId, scenes) {
         const info = document.createElement('div');
         info.className = 'gallery-item-info';
         info.innerHTML = `
-            <p class="gallery-item-num">场景 ${i + 1}</p>
+            <p class="gallery-item-num">${scene.is_cover
+                ? '片头封面'
+                : `场景 ${scene.scene_number || i + 1} · PDF 第 ${(scene.page_sources || [scene.page_source]).join(',')} 页`}</p>
             <p class="gallery-item-mood">${scene.mood || ''}</p>
             <p class="gallery-item-narration">${(scene.narration || '').substring(0, 80)}...</p>
         `;

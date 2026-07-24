@@ -158,8 +158,8 @@ def _ensure_ai_page_coverage(scenes, ocr_results):
     """补齐 AI 分析偶尔漏掉的 PDF 页，并保持场景顺序。
 
     LLM 分批返回 JSON 时，某一批可能少生成一个场景，导致相邻场景之间
-    直接从第 8 页跳到第 10 页。仅在场景数量已接近页数时启用补齐，避免
-    干扰 AI 有意把多页合并为一个场景的正常行为。
+    直接从第 8 页跳到第 10 页。每个缺失页都新增独立场景，禁止把两页
+    合并到同一张场景图片。
     """
     if not scenes or not ocr_results:
         return scenes, []
@@ -169,7 +169,7 @@ def _ensure_ai_page_coverage(scenes, ocr_results):
         if str(item.get('page_num', '')).isdigit()
     }
     page_numbers = sorted(page_records)
-    if not page_numbers or len(scenes) < max(1, int(len(page_numbers) * 0.75)):
+    if not page_numbers:
         return scenes, []
 
     covered = set()
@@ -223,6 +223,41 @@ def _ensure_ai_page_coverage(scenes, ocr_results):
     for index, scene in enumerate(result, 1):
         scene['scene_number'] = index
     return result, missing
+
+
+def _apply_confirmed_narrations(scenes, confirmed_text):
+    """按显式场景索引写回伴读文字，封面始终保持无旁白。"""
+    if confirmed_text:
+        try:
+            edited_texts = json.loads(confirmed_text)
+            if not isinstance(edited_texts, list):
+                edited_texts = [confirmed_text]
+        except (TypeError, json.JSONDecodeError):
+            edited_texts = confirmed_text.splitlines()
+
+        if edited_texts and all(isinstance(item, dict) for item in edited_texts):
+            for item in edited_texts:
+                try:
+                    index = int(item.get('scene_index'))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(scenes) and not scenes[index].get('is_cover'):
+                    scenes[index]['narration'] = str(item.get('narration') or '').strip()
+        elif len(edited_texts) == len(scenes):
+            for index, scene in enumerate(scenes):
+                if not scene.get('is_cover'):
+                    scene['narration'] = str(edited_texts[index]).strip()
+        else:
+            # Legacy clients may omit the leading blank cover entry.
+            content_scenes = [scene for scene in scenes if not scene.get('is_cover')]
+            for index, scene in enumerate(content_scenes):
+                if index < len(edited_texts):
+                    scene['narration'] = str(edited_texts[index]).strip()
+
+    for scene in scenes:
+        if scene.get('is_cover'):
+            scene['narration'] = ''
+    return scenes
 
 
 def _combine_page_images(paths, output_path, layout='vertical'):
@@ -532,17 +567,7 @@ def run_pipeline(task_id, pdf_path, config):
                 task_id, 'TTS 伴读文本确认', '请检查并确认每个场景的伴读文字',
                 prompt=narration_prompt, timeout=180
             )
-            if confirmed_text:
-                try:
-                    edited_texts = json.loads(confirmed_text)
-                    if not isinstance(edited_texts, list):
-                        edited_texts = [confirmed_text]
-                except (TypeError, json.JSONDecodeError):
-                    # 兼容旧版前端提交的逐行文本。
-                    edited_texts = confirmed_text.splitlines()
-                for index, scene in enumerate(scenes):
-                    if index < len(edited_texts):
-                        scene['narration'] = str(edited_texts[index]).strip()
+            _apply_confirmed_narrations(scenes, confirmed_text)
             update_task(task_id, phase='tts', progress=75,
                         message='正在生成旁白配音...')
             audio_dir = os.path.join(work_dir, 'audio')

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """OCR 处理器：从扫描页面图片中识别文字"""
 import os
+import re
 import tempfile
 # 必须在导入 OpenCV/ONNXRuntime 前设置，避免本地推理创建过多 BLAS 线程并耗尽内存。
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -177,8 +178,13 @@ def ocr_pages(image_paths, progress_callback=None, language="ch", engine="rapido
 
     for i, path in enumerate(image_paths):
         result = ocr_image(path, language=language, engine=engine)
+        # Keep the original PDF page number encoded in page_XXXX.png.  Using
+        # i + 1 here breaks non-contiguous selections such as 1,3,5-10 and
+        # makes later scene-to-image mapping skip or duplicate pages.
+        match = re.search(r"(?:^|_)page_(\d+)(?:\.[^.]+)?$", os.path.basename(path), re.I)
+        page_num = int(match.group(1)) if match else i + 1
         results.append({
-            'page_num': i + 1,
+            'page_num': page_num,
             'image_path': path,
             'text': result['text'],
             'blocks': result['blocks'],

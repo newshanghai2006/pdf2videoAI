@@ -154,6 +154,77 @@ def _manual_scenes(ocr_results, pages_per_segment=1, duration=5.0,
     return scenes
 
 
+def _ensure_ai_page_coverage(scenes, ocr_results):
+    """补齐 AI 分析偶尔漏掉的 PDF 页，并保持场景顺序。
+
+    LLM 分批返回 JSON 时，某一批可能少生成一个场景，导致相邻场景之间
+    直接从第 8 页跳到第 10 页。仅在场景数量已接近页数时启用补齐，避免
+    干扰 AI 有意把多页合并为一个场景的正常行为。
+    """
+    if not scenes or not ocr_results:
+        return scenes, []
+    page_records = {
+        int(item.get('page_num')): item
+        for item in ocr_results
+        if str(item.get('page_num', '')).isdigit()
+    }
+    page_numbers = sorted(page_records)
+    if not page_numbers or len(scenes) < max(1, int(len(page_numbers) * 0.75)):
+        return scenes, []
+
+    covered = set()
+    for scene in scenes:
+        refs = scene.get('page_sources') or [scene.get('page_source')]
+        for value in refs:
+            try:
+                page = int(value)
+            except (TypeError, ValueError):
+                continue
+            if page in page_records:
+                covered.add(page)
+    missing = [page for page in page_numbers if page not in covered]
+    if not missing:
+        return scenes, []
+
+    result = list(scenes)
+    for page in missing:
+        record = page_records[page]
+        text = str(record.get('text') or '').replace('\r', '').replace('\n', '').strip()
+        fallback = {
+            'scene_number': 0,
+            'page_source': page,
+            'page_sources': [page],
+            'narration': text,
+            'dialogue': [],
+            'image_prompt': (
+                f"A cinematic scene based on Chinese historical comic page {page}. "
+                "Preserve the people, setting and action described by the source page. "
+                "No readable text, subtitles, logos or watermarks."
+            ),
+            'mood': 'calm',
+            'duration': 5,
+        }
+        insert_at = len(result)
+        for index, current in enumerate(result):
+            refs = current.get('page_sources') or [current.get('page_source')]
+            valid_refs = []
+            for value in refs:
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if value in page_records:
+                    valid_refs.append(value)
+            if valid_refs and min(valid_refs) > page:
+                insert_at = index
+                break
+        result.insert(insert_at, fallback)
+
+    for index, scene in enumerate(result, 1):
+        scene['scene_number'] = index
+    return result, missing
+
+
 def _combine_page_images(paths, output_path, layout='vertical'):
     """将同一视频段的多页按横向或纵向拼接为一张完整画面。"""
     images = [Image.open(path).convert('RGB') for path in paths if os.path.exists(path)]
@@ -323,6 +394,17 @@ def run_pipeline(task_id, pdf_path, config):
                 f"每段 {max(1, int(config.get('pages_per_segment', 1) or 1))} 页"))
 
         scenes = story.get('scenes', [])
+        if use_ai_analysis:
+            scenes, missing_pages = _ensure_ai_page_coverage(scenes, ocr_results)
+            if missing_pages:
+                story['scenes'] = scenes
+                update_task(
+                    task_id,
+                    message=(
+                        f"AI 分析检测到缺少 PDF 页 {','.join(map(str, missing_pages))}，"
+                        "已自动补齐对应场景"
+                    ),
+                )
         update_task(task_id, scenes=scenes, progress=36,
                     message=f'剧情分析完成，共{len(scenes)}个场景')
 
@@ -348,11 +430,16 @@ def run_pipeline(task_id, pdf_path, config):
         # ===== 阶段4: AI 画面生成（可选；关闭时直接使用 PDF 原页面） =====
         update_task(task_id, phase='generate', progress=38,
                     message='正在准备视频画面...')
+        page_by_num = {
+            int(os.path.basename(path).split('_')[-1].split('.')[0]): path
+            for path in page_images
+        }
         for scene_index, scene in enumerate(scenes):
-            source_index = int(scene.get('page_source') or 0) - 1
-            if source_index < 0 or source_index >= len(page_images):
-                source_index = scene_index % len(page_images)
-            scene['source_image_path'] = page_images[source_index]
+            page_num = int(scene.get('page_source') or 0)
+            scene['source_image_path'] = (
+                page_by_num.get(page_num)
+                or page_images[scene_index % len(page_images)]
+            )
         if colorize_pages_enabled:
             color_dir = os.path.join(work_dir, 'color_pages')
             colored_pages = colorize_pages(
@@ -382,10 +469,6 @@ def run_pipeline(task_id, pdf_path, config):
                     scene['image_path'] = scene.get('image_path') or scene.get('source_image_path')
                 update_task(task_id, message='AI 生图已降级，未完成场景使用 PDF 原页面')
         else:
-            page_by_num = {
-                int(os.path.basename(path).split('_')[-1].split('.')[0]): path
-                for path in page_images
-            }
             source_numbers = [int(s.get('page_source') or 0) for s in scenes]
             repeated_single_source = (
                 len(scenes) > 1 and len(set(source_numbers)) == 1
@@ -397,8 +480,8 @@ def run_pipeline(task_id, pdf_path, config):
                 page_num = int(scene.get('page_source') or 0)
                 sequential_path = page_images[scene_index % len(page_images)]
                 source_numbers_for_scene = scene.get('page_sources') or [page_num]
-                source_paths = [page_images[n - 1] for n in source_numbers_for_scene
-                                if isinstance(n, int) and 1 <= n <= len(page_images)]
+                source_paths = [page_by_num.get(n) for n in source_numbers_for_scene
+                                if isinstance(n, int) and page_by_num.get(n)]
                 if len(source_paths) > 1:
                     combined = os.path.join(work_dir, 'manual_pages', f'segment_{scene_index + 1:04d}.png')
                     scene['image_path'] = _combine_page_images(source_paths, combined, page_layout)

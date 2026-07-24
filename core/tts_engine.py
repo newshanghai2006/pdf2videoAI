@@ -9,7 +9,9 @@
 import os
 import re
 import asyncio
+import base64
 import logging
+import shutil
 import subprocess
 
 import edge_tts
@@ -45,17 +47,83 @@ async def _tts_to_file(text, output_path, voice, rate="+0%", volume="+0%"):
     await communicate.save(output_path)
 
 
+def _synth_windows_sapi(text, output_path, rate="+0%"):
+    """Use an installed Windows Speech voice when edge-tts is unreachable."""
+    if os.name != "nt" or not text or not text.strip():
+        return None
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        return None
+    try:
+        rate_value = int(re.search(r"[-+]?\d+", str(rate)).group(0))
+    except (AttributeError, TypeError, ValueError):
+        rate_value = 0
+    rate_value = max(-10, min(10, round(rate_value / 10)))
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    sapi_path = output_path if output_path.lower().endswith(".wav") else output_path + ".sapi.wav"
+    env = os.environ.copy()
+    env["PDF2VIDEO_SAPI_TEXT"] = base64.b64encode(text.encode("utf-16-le")).decode("ascii")
+    env["PDF2VIDEO_SAPI_PATH"] = base64.b64encode(
+        os.path.abspath(sapi_path).encode("utf-16-le")
+    ).decode("ascii")
+    env["PDF2VIDEO_SAPI_RATE"] = str(rate_value)
+    script = r'''
+Add-Type -AssemblyName System.Speech
+$text = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($env:PDF2VIDEO_SAPI_TEXT))
+$path = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($env:PDF2VIDEO_SAPI_PATH))
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$voice = $synth.GetInstalledVoices() | Where-Object {
+    $_.VoiceInfo.Name -match 'Huihui|Chinese'
+} | Select-Object -First 1
+if ($null -eq $voice) { throw 'No Chinese Windows SAPI voice installed' }
+$synth.SelectVoice($voice.VoiceInfo.Name)
+$synth.Rate = [int]$env:PDF2VIDEO_SAPI_RATE
+$synth.SetOutputToWaveFile($path)
+$synth.Speak($text)
+$synth.SetOutputToNull()
+$synth.Dispose()
+'''
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", script],
+            capture_output=True, text=True, timeout=90, env=env,
+        )
+        if result.returncode == 0 and os.path.exists(sapi_path) and os.path.getsize(sapi_path) > 512:
+            if sapi_path != output_path:
+                os.replace(sapi_path, output_path)
+            return output_path
+        logger.warning("Windows 本地 TTS 失败: %s", (result.stderr or result.stdout).strip()[-500:])
+    except Exception as error:
+        logger.warning("Windows 本地 TTS 调用失败: %s", error)
+    return None
+
+
 def _synth(text, output_path, voice, rate="+0%", volume="+0%"):
     """合成单段语音，成功返回路径，失败返回 None。"""
     if not text or not text.strip():
         return None
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    edge_error = None
     try:
         asyncio.run(_tts_to_file(text, output_path, voice, rate, volume))
-        return output_path if os.path.exists(output_path) else None
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 512:
+            return output_path
     except Exception as e:
-        logger.warning(f"TTS生成失败（网络不可达?）: {e}")
-        return None
+        edge_error = e
+
+    # edge-tts requires access to Microsoft's online speech service. On
+    # Windows, fall back to an installed local Chinese SAPI voice so a network
+    # outage does not silently produce a completely silent film.
+    local_path = _synth_windows_sapi(text, output_path, rate)
+    if local_path:
+        logger.warning("在线 edge-tts 不可用，已改用 Windows 本地中文语音")
+        return local_path
+    logger.warning(
+        "TTS生成失败：在线 edge-tts 需要访问 speech.platform.bing.com；"
+        "本机 Windows 中文语音回退也不可用。原始错误: %s", edge_error,
+    )
+    return None
 
 
 def _concat_audio(parts, output_path):

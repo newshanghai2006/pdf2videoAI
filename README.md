@@ -325,7 +325,9 @@ Windows 的 `install.bat` 使用 `venv --without-pip` 创建项目环境，再�
 | `zh-CN-XiaoyiNeural` | 晓伊 | 女·活泼 |
 | `zh-CN-XiaohanNeural` | 晓涵 | 女·大气 |
 
-> TTS 依赖微软在线服务，网络不通时自动降级为无声影片。
+> `edge-tts` 默认需要访问微软在线语音服务 `speech.platform.bing.com`。Windows 上如果在线
+> 服务不可达，程序会自动尝试系统已安装的中文 SAPI 语音（例如 Microsoft Huihui Desktop）；
+> 若系统没有中文语音，则才会降级为无声影片。Linux/macOS 仍需在线服务或自行接入本地 TTS。
 
 ---
 
@@ -576,7 +578,9 @@ curl http://127.0.0.1:5000/api/progress/<task_id>
 
 ### Q: TTS 配音失败怎么办？
 
-TTS 依赖微软在线服务。如果网络不通，系统会自动降级为无声影片，不影响影片生成。可关闭 TTS 开关跳过此步骤。
+TTS 首先使用 `edge-tts` 访问微软在线语音服务；Windows 网络不可用时会自动回退到本机中文
+SAPI 语音。若日志仍显示“本地中文 TTS 回退也不可用”，请在 Windows 设置中安装中文语音包，
+或恢复对 `speech.platform.bing.com` 的访问。所有方案都不可用时才会生成无声影片。
 
 ### Q: OCR 识别准确率不高？
 

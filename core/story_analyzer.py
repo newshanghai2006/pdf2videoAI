@@ -97,6 +97,59 @@ def _error_message(error, base_url, model):
     return f"{prefix}: {type(error).__name__}: {error}"
 
 
+def _normalize_batch_page_sources(scenes, batch_pages):
+    """把一个 LLM 批次的场景页码绑定到该批真实 PDF 页码。
+
+    模型有时会忽略输入中的绝对页码，在每个批次都返回 1、2、3，或者
+    跳过一个页码。若直接合并这些结果，后面的图片和旁白会整体错位。
+    对完全有效且不重复的页码保留模型结果；否则按批次页序均匀分配，
+    允许一个场景通过 ``page_sources`` 表示多页。
+    """
+    if not scenes or not batch_pages:
+        return scenes
+    allowed = set(batch_pages)
+    claimed = []
+    valid = True
+    for scene in scenes:
+        refs = scene.get('page_sources') or [scene.get('page_source')]
+        current = []
+        for value in refs:
+            try:
+                page = int(value)
+            except (TypeError, ValueError):
+                continue
+            if page in allowed and page not in current:
+                current.append(page)
+        if not current or any(page in claimed for page in current):
+            valid = False
+            break
+        claimed.extend(current)
+    if valid and set(claimed) == allowed:
+        for scene in scenes:
+            refs = scene.get('page_sources') or [scene.get('page_source')]
+            refs = [int(value) for value in refs if str(value).lstrip('-').isdigit()]
+            scene['page_sources'] = refs
+            scene['page_source'] = refs[0]
+        # Comic pages are a chronological source. Keep the returned scene
+        # order aligned with that source even if the model reordered entries.
+        scenes.sort(key=lambda item: min(item.get('page_sources') or [0]))
+        for index, scene in enumerate(scenes, 1):
+            scene['scene_number'] = index
+        return scenes
+
+    # The returned scene count may be smaller because the model intentionally
+    # merged adjacent pages. Distribute the real pages without dropping any.
+    count = len(scenes)
+    for index, scene in enumerate(scenes):
+        start = round(index * len(batch_pages) / count)
+        end = round((index + 1) * len(batch_pages) / count)
+        refs = batch_pages[start:end] or [batch_pages[min(start, len(batch_pages) - 1)]]
+        scene['page_sources'] = refs
+        scene['page_source'] = refs[0]
+        scene['scene_number'] = index + 1
+    return scenes
+
+
 def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=None,
                   llm_model=None, progress_callback=None):
     """用 LLM 分析 OCR 文字，拆分为场景并生成画面提示词。
@@ -131,6 +184,10 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                                   f"AI 分批分析 {batch_index + 1}/{len(batches)}")
             part = analyze_story(batch, art_style=art_style, api_key=api_key,
                                  base_url=base_url, llm_model=llm_model)
+            _normalize_batch_page_sources(
+                part.get('scenes', []),
+                [int(item['page_num']) for item in batch],
+            )
             if not merged['title']:
                 merged['title'] = part.get('title', '')
             if part.get('summary'):
@@ -241,6 +298,10 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
             "请减少单次页面数量、改用输出能力更强的模型，或重试当前批次。"
         ) from error
 
+    _normalize_batch_page_sources(
+        result.get('scenes', []),
+        [int(item['page_num']) for item in ocr_results],
+    )
     return result
 
 

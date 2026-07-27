@@ -10,6 +10,8 @@ let state = {
     decisionTimer: null,
     decisionCountdownInterval: null,
     decisionSeconds: 60,
+    decisionEditing: false,
+    decisionSubmitting: false,
     taskId: null,
     pollTimer: null,
     lastSceneCount: 0,
@@ -51,6 +53,8 @@ function setupCoverUpload() {
 
 async function submitDecision(decision) {
     if (!state.taskId) return;
+    if (state.decisionSubmitting) return;
+    state.decisionSubmitting = true;
     if (state.decisionTimer) {
         clearTimeout(state.decisionTimer);
         state.decisionTimer = null;
@@ -59,19 +63,24 @@ async function submitDecision(decision) {
         clearInterval(state.decisionCountdownInterval);
         state.decisionCountdownInterval = null;
     }
-    const res = await fetch(`/api/decision/${state.taskId}`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({decision, prompt: collectDecisionPrompt()}),
-    });
-    const data = await res.json();
-    // 自动提交与用户点击可能同时到达；任务已恢复时的 409 不应再次弹窗。
-    if (!res.ok) {
-        if (res.status !== 409) alert(data.error || '提交选择失败');
-        return;
+    try {
+        const res = await fetch(`/api/decision/${state.taskId}`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({decision, prompt: collectDecisionPrompt()}),
+        });
+        const data = await res.json();
+        // 自动提交与用户点击可能同时到达；任务已恢复时的 409 不应再次弹窗。
+        if (!res.ok) {
+            if (res.status !== 409) alert(data.error || '提交选择失败');
+            return;
+        }
+        document.getElementById('decisionBox').style.display = 'none';
+        document.getElementById('progressMessage').textContent =
+            decision === 'continue' ? '正在继续生成...' : '正在退出任务...';
+    } finally {
+        state.decisionSubmitting = false;
+        state.decisionEditing = false;
     }
-    document.getElementById('decisionBox').style.display = 'none';
-    document.getElementById('progressMessage').textContent =
-        decision === 'continue' ? '正在以无 AI 模式继续...' : '正在退出任务...';
 }
 
 function collectDecisionPrompt() {
@@ -787,6 +796,7 @@ async function pollProgress() {
                 sceneEditor.style.display = 'grid';
                 if (!sceneEditor.children.length || sceneEditor.dataset.taskId !== state.taskId) {
                     sceneEditor.dataset.taskId = state.taskId;
+                    state.decisionEditing = false;
                     sceneEditor.innerHTML = (data.scenes || []).map((scene, index) => `
                         <div class="decision-scene-item">
                             <div class="decision-scene-title">${scene.is_cover
@@ -800,6 +810,7 @@ async function pollProgress() {
                         </div>`).join('');
                     sceneEditor.querySelectorAll('.decision-scene-prompt').forEach(field => {
                         const stopCountdown = () => {
+                            state.decisionEditing = true;
                             if (state.decisionTimer) { clearTimeout(state.decisionTimer); state.decisionTimer = null; }
                             if (state.decisionCountdownInterval) { clearInterval(state.decisionCountdownInterval); state.decisionCountdownInterval = null; }
                             document.getElementById('decisionMsg').textContent = '已开始编辑，倒计时已停止。修改完成后请点击确认。';
@@ -815,7 +826,8 @@ async function pollProgress() {
             }
             }
             document.getElementById('btnContinueWithoutAi').textContent = promptMode ? '修改后重新提交' : (ttsMode ? '确认文本并生成配音' : '无 AI 继续');
-            if (ttsMode && !state.decisionTimer) {
+            if (ttsMode && !state.decisionTimer
+                    && !state.decisionEditing && !state.decisionSubmitting) {
                 state.decisionSeconds = 60;
                 state.decisionTimer = setTimeout(() => submitDecision('continue'), 60000);
                 state.decisionCountdownInterval = setInterval(() => {

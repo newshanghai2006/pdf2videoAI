@@ -115,7 +115,7 @@ def get_task(task_id):
 
 
 def wait_for_decision(task_id, stage, error, prompt='', timeout=3600):
-    """暂停后台任务，等待前端选择 continue 或 abort。"""
+    """暂停后台任务等待用户决定；TTS 文本确认超时后自动继续。"""
     with _tasks_lock:
         task = _tasks[task_id]
         event = task['decision_event']
@@ -125,13 +125,21 @@ def wait_for_decision(task_id, stage, error, prompt='', timeout=3600):
                     decision_prompt=prompt,
                     error='' if confirmation else str(error),
                     message='请确认每个场景的伴读文字' if confirmation else f'{stage}失败，请选择继续或退出')
-    if not event.wait(timeout):
-        raise RuntimeError(f'{stage}失败且等待用户决定超时: {error}')
+    signaled = event.wait(timeout)
     with _tasks_lock:
-        decision = _tasks[task_id].get('decision')
-        decision_prompt = _tasks[task_id].get('decision_prompt', '')
-        _tasks[task_id]['status'] = 'running'
-        _tasks[task_id]['error'] = None
+        task = _tasks[task_id]
+        # 浏览器可能进入后台、断网或定时器被节流。TTS 确认属于可选编辑步骤，
+        # 后端超时必须以原有文字自动继续，不能让已完成的 OCR/生图工作作废。
+        if not signaled and confirmation and task.get('decision') is None:
+            task['decision'] = 'continue'
+            task['decision_auto'] = True
+            task['message'] = '伴读文本确认等待超时，已自动采用当前文字继续生成配音'
+        decision = task.get('decision')
+        decision_prompt = task.get('decision_prompt', '')
+        task['status'] = 'running'
+        task['error'] = None
+    if not signaled and not confirmation:
+        raise RuntimeError(f'{stage}失败且等待用户决定超时: {error}')
     if decision != 'continue':
         raise RuntimeError(f'用户已终止任务（{stage}失败: {error}）')
     return decision_prompt

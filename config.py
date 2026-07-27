@@ -136,14 +136,33 @@ NVIDIA_IMAGE_MODELS = {
     "stabilityai/stable-diffusion-xl": "Stable Diffusion XL (NVIDIA NIM)",
 }
 
+AGNES_BASE_URL = os.environ.get("AGNES_BASE_URL", "https://apihub.agnes-ai.com/v1")
+AGNES_LLM_MODELS = {
+    "agnes-2.0-flash": "Agnes 2.0 Flash（免费文本/视觉理解）",
+}
+AGNES_IMAGE_MODELS = {
+    "agnes-image-2.0-flash": "Agnes Image 2.0 Flash（免费文生图/图生图）",
+}
+AGNES_VIDEO_MODELS = {
+    "agnes-video-v2.0": "Agnes Video V2.0（免费异步视频生成）",
+}
+
+# Agnes Image 的档位式尺寸。服务端可能把精确像素请求标准化到这些尺寸。
+AGNES_IMAGE_SIZES = {
+    "1K": "1K（免费默认 20 RPM）",
+    "2K": "2K（免费默认 10 RPM）",
+    "3K": "3K（免费默认 1 RPM）",
+    "4K": "4K（免费默认 1 RPM）",
+}
+
 # 艺术风格预设
 ART_STYLES = {
     "chinese_ink": "中国传统水墨彩绘风格，色彩鲜明，笔触流畅，具有东方美学",
-    "cinematic": "电影级写实风格，光影戏剧化，画面宏大震撼，类似好莱坞历史大片",
-    "anime": "精致动漫风格，色彩饱和度高，人物造型优美，类似日本动画电影",
-    "oil_painting": "西方油画风格，厚重笔触，光影丰富，具有古典艺术感",
+    "cinematic": "中国历史电影级写实风格，光影戏剧化，人物服饰与建筑符合中国朝代背景",
+    "anime": "中国动画电影风格，色彩饱和度高，人物造型优美并保留中国文化特征",
+    "oil_painting": "古典油画质感，厚重笔触与丰富光影，人物和场景仍严格保持中国历史特征",
     "illustration": "精美插画风，色彩温暖，细节丰富，适合故事叙述",
-    "comic": "美漫风格，线条硬朗，色彩浓烈，具有冲击力",
+    "comic": "中国连环画彩色漫画风格，线条有力，色彩浓烈，保留中国人物与时代特征",
     "gongbi": "中国工笔重彩画风格，精细工整，色彩艳丽，具有传统国画韵味",
 }
 
@@ -169,5 +188,6 @@ VIDEO_ENGINES = {
     "static": "静态全画面（完整显示，不运动）",
     "kenburns": "Ken Burns 运镜（图像+缓动，默认，无需额外API）",
     "seedance": "火山 Seedance 文生视频（规划中，需火山 API Key）",
+    "agnes": "Agnes Video V2.0（免费异步文生视频）",
 }
 DEFAULT_VIDEO_ENGINE = os.environ.get("VIDEO_ENGINE", "kenburns")

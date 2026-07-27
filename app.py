@@ -23,6 +23,8 @@ from config import (
     IMAGE_API_KEY, IMAGE_BASE_URL,
     SETTINGS_FILE,
     NVIDIA_LLM_MODELS, NVIDIA_IMAGE_MODELS,
+    AGNES_BASE_URL, AGNES_LLM_MODELS, AGNES_IMAGE_MODELS, AGNES_VIDEO_MODELS,
+    AGNES_IMAGE_SIZES,
 )
 
 app = Flask(__name__)
@@ -39,6 +41,7 @@ def local_settings():
         'llm_api_key', 'llm_base_url', 'llm_model',
         'image_api_key', 'image_base_url', 'image_model',
         'seedance_api_key', 'seedance_base_url', 'seedance_model',
+        'video_api_key', 'video_base_url', 'video_model',
     }
     if request.method == 'GET':
         try:
@@ -375,8 +378,14 @@ def run_pipeline(task_id, pdf_path, config):
 
         api_key = config.get('llm_api_key') or config.get('api_key', '')
         base_url = config.get('llm_base_url') or config.get('base_url', '')
-        image_api_key = config.get('image_api_key') or IMAGE_API_KEY or api_key
         image_base_url = config.get('image_base_url') or IMAGE_BASE_URL or base_url
+        configured_image_key = config.get('image_api_key', '')
+        if configured_image_key:
+            image_api_key = configured_image_key
+        elif any(host in image_base_url.lower() for host in ('agnes-ai.com', 'nvidia.com')):
+            image_api_key = api_key
+        else:
+            image_api_key = IMAGE_API_KEY or api_key
         art_style = config.get('art_style', 'cinematic')
         resolution = config.get('resolution', '1080p_land')
         orientation = config.get('orientation', 'landscape')
@@ -409,6 +418,7 @@ def run_pipeline(task_id, pdf_path, config):
         bgm_volume = config.get('bgm_volume', 0.15)
         llm_model = config.get('llm_model', '')
         image_model = config.get('image_model', '')
+        image_size_tier = config.get('image_size_tier', '1K')
         video_engine = config.get('video_engine', DEFAULT_VIDEO_ENGINE)
         export_prompts = config.get('export_prompts', False)
         cover_mode = config.get('cover_mode', 'none')
@@ -555,6 +565,7 @@ def run_pipeline(task_id, pdf_path, config):
             colored_pages = colorize_pages(
                 page_images, color_dir, api_key=image_api_key,
                 base_url=image_base_url, image_model=image_model or None,
+                image_size_tier=image_size_tier,
                 progress_callback=lambda c, t, m, img: update_task(
                     task_id, progress=38 + int(c / (t or 1) * 35),
                     message=m, scenes=scenes)
@@ -567,6 +578,7 @@ def run_pipeline(task_id, pdf_path, config):
                     scenes, scenes_dir, orientation=orientation,
                     api_key=image_api_key, base_url=image_base_url,
                     image_model=image_model or None,
+                        image_size_tier=image_size_tier,
                         progress_callback=lambda c, t, m, img: update_task(
                             task_id, progress=38 + int(c / (t or 1) * 35),
                             message=m, scenes=scenes),
@@ -619,7 +631,8 @@ def run_pipeline(task_id, pdf_path, config):
                 try:
                     generate_scene_image(cover_prompt, cover_image, orientation=orientation,
                                          api_key=image_api_key, base_url=image_base_url,
-                                         image_model=image_model or None)
+                                         image_model=image_model or None,
+                                         image_size_tier=image_size_tier)
                 except Exception as cover_error:
                     if 'CONTENT_FILTERED' in str(cover_error).upper():
                         cover_image = ''
@@ -698,9 +711,23 @@ def run_pipeline(task_id, pdf_path, config):
             bgm_path=bgm_file, bgm_volume=bgm_volume,
             use_tts=tts_ok, video_engine=video_engine,
             engine_opts={
-                'api_key': config.get('seedance_api_key', ''),
-                'base_url': config.get('seedance_base_url', ''),
-                'model': config.get('seedance_model', ''),
+                'api_key': (
+                    config.get('video_api_key', '')
+                    or config.get('seedance_api_key', '')
+                    or (api_key if video_engine == 'agnes' else '')
+                ),
+                'base_url': (
+                    config.get('video_base_url', '')
+                    or config.get('seedance_base_url', '')
+                    or (AGNES_BASE_URL if video_engine == 'agnes' else '')
+                ),
+                'model': (
+                    config.get('video_model', '')
+                    or config.get('seedance_model', '')
+                    or ('agnes-video-v2.0' if video_engine == 'agnes' else '')
+                ),
+                'resolution_tier': config.get('video_resolution_tier', '720p'),
+                'frame_rate': config.get('video_frame_rate', 24),
             },
             progress_callback=lambda pct, msg: update_task(
                 task_id, progress=87 + int(pct / 100 * 13),
@@ -740,6 +767,11 @@ def get_config():
         'image_models': IMAGE_MODELS,
         'nvidia_llm_models': NVIDIA_LLM_MODELS,
         'nvidia_image_models': NVIDIA_IMAGE_MODELS,
+        'agnes_base_url': AGNES_BASE_URL,
+        'agnes_llm_models': AGNES_LLM_MODELS,
+        'agnes_image_models': AGNES_IMAGE_MODELS,
+        'agnes_video_models': AGNES_VIDEO_MODELS,
+        'agnes_image_sizes': AGNES_IMAGE_SIZES,
         'default_llm_model': LLM_MODEL,
         'default_image_model': IMAGE_MODEL,
         'video_engines': VIDEO_ENGINES,
@@ -755,14 +787,21 @@ def test_connection():
     data = request.json or {}
     api_key = data.get('llm_api_key', '').strip() or data.get('api_key', '').strip()
     base_url = data.get('llm_base_url', '').strip() or data.get('base_url', '').strip()
-    image_api_key = data.get('image_api_key', '').strip() or IMAGE_API_KEY or api_key
     image_base_url = data.get('image_base_url', '').strip() or IMAGE_BASE_URL or base_url
+    explicit_image_key = data.get('image_api_key', '').strip()
+    if explicit_image_key:
+        image_api_key = explicit_image_key
+    elif any(host in image_base_url.lower() for host in ('agnes-ai.com', 'nvidia.com')):
+        image_api_key = api_key
+    else:
+        image_api_key = IMAGE_API_KEY or api_key
     llm_model = data.get('llm_model', '').strip() or LLM_MODEL
     image_model = data.get('image_model', '').strip() or IMAGE_MODEL
+    image_size_tier = data.get('image_size_tier', '1K').strip().upper()
     use_image_generation = bool(data.get('use_image_generation', False))
     colorize_pages_enabled = bool(data.get('colorize_pages', False))
 
-    result = {'llm': None, 'image': None}
+    result = {'llm': None, 'image': None, 'video': None}
 
     # ===== 测试 LLM（可选） =====
     if not bool(data.get('use_ai_analysis', True)):
@@ -789,10 +828,33 @@ def test_connection():
     else:
       try:
         from core.image_generator import test_image_model
-        info = test_image_model(image_api_key, image_base_url, image_model)
+        info = test_image_model(image_api_key, image_base_url, image_model,
+                                image_size_tier=image_size_tier)
         result['image'] = {'ok': True, 'model': image_model, 'info': info}
       except Exception as e:
         result['image'] = {'ok': False, 'model': image_model, 'error': str(e)}
+
+    video_engine = data.get('video_engine', '').strip()
+    if video_engine == 'agnes':
+        video_key = data.get('video_api_key', '').strip() or api_key
+        video_base = data.get('video_base_url', '').strip() or AGNES_BASE_URL
+        video_model = data.get('video_model', '').strip() or 'agnes-video-v2.0'
+        if not video_key:
+            result['video'] = {'ok': False, 'model': video_model,
+                               'error': '未填写 Agnes 视频 API Key，也没有可复用的 LLM Key'}
+        elif not video_base.startswith(('http://', 'https://')):
+            result['video'] = {'ok': False, 'model': video_model,
+                               'error': '视频 Base URL 必须以 http:// 或 https:// 开头'}
+        else:
+            # 官方没有无消耗的健康检查端点。避免连接测试创建收费/耗时的视频任务，
+            # 此处只验证配置，真实鉴权在首次提交场景时完成。
+            result['video'] = {
+                'ok': True, 'configured': True, 'model': video_model,
+                'message': '配置格式有效；未创建视频任务，实际鉴权将在生成时验证',
+            }
+    else:
+        result['video'] = {'ok': True, 'skipped': True, 'model': '',
+                           'message': '未选择 Agnes 视频引擎'}
 
     return jsonify(result)
 
@@ -882,7 +944,7 @@ def start_process():
     api_key = data.get('llm_api_key', '').strip() or data.get('api_key', '').strip()
     use_ai_analysis = bool(data.get('use_ai_analysis', True))
     if use_ai_analysis and not api_key:
-        return jsonify({'error': '请填写 OpenAI API Key'}), 400
+        return jsonify({'error': '请填写 LLM API Key'}), 400
 
     task_id = create_task()
 
@@ -895,6 +957,7 @@ def start_process():
         'image_base_url': data.get('image_base_url', '').strip(),
         'llm_model': data.get('llm_model', '').strip(),
         'image_model': data.get('image_model', '').strip(),
+        'image_size_tier': data.get('image_size_tier', '1K').strip().upper(),
         'use_image_generation': bool(data.get('use_image_generation', False)),
         'colorize_pages': bool(data.get('colorize_pages', False)),
         'art_style': data.get('art_style', 'cinematic'),
@@ -928,6 +991,11 @@ def start_process():
         'seedance_api_key': data.get('seedance_api_key', '').strip(),
         'seedance_base_url': data.get('seedance_base_url', '').strip(),
         'seedance_model': data.get('seedance_model', '').strip(),
+        'video_api_key': data.get('video_api_key', '').strip(),
+        'video_base_url': data.get('video_base_url', '').strip(),
+        'video_model': data.get('video_model', '').strip(),
+        'video_resolution_tier': data.get('video_resolution_tier', '720p').strip().lower(),
+        'video_frame_rate': int(data.get('video_frame_rate', 24) or 24),
     }
 
     # 启动后台线程

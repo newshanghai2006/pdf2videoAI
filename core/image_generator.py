@@ -13,11 +13,13 @@ import urllib.request
 import urllib.error
 import json
 import re
+import mimetypes
 from openai import OpenAI
 from PIL import Image
 
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, IMAGE_MODEL, IMAGE_QUALITY
-from .rate_limiter import nvidia_limiter
+from .prompt_optimizer import optimize_chinese_visual_prompt
+from .rate_limiter import get_agnes_image_limiter, nvidia_limiter
 
 
 def get_client(api_key=None, base_url=None):
@@ -39,6 +41,86 @@ def _download(url, output_path):
 
 def _is_nvidia(base_url, api_key):
     return ("nvidia" in (base_url or "").lower()) or (api_key or "").startswith("nvapi-")
+
+
+def _is_agnes(base_url, model=None):
+    return ("agnes-ai.com" in (base_url or "").lower()
+            or (model or "").lower().startswith("agnes-image-"))
+
+
+def _agnes_images_endpoint(base_url):
+    base = (base_url or "https://apihub.agnes-ai.com/v1").strip().rstrip("/")
+    if base.endswith("/images/generations"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/images/generations"
+    return base + "/v1/images/generations"
+
+
+def _image_data_uri(path):
+    mime = mimetypes.guess_type(path)[0] or "image/png"
+    with open(path, "rb") as handle:
+        encoded = base64.b64encode(handle.read()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _agnes_generate(prompt, output_path, api_key, base_url, model,
+                    orientation="landscape", size_tier="1K", input_paths=None):
+    """调用 Agnes Image 2.0 Flash，支持文生图和 Data URI 图生图。"""
+    tier = str(size_tier or "1K").upper()
+    if tier not in ("1K", "2K", "3K", "4K"):
+        raise ValueError("Agnes 图片尺寸档位必须是 1K、2K、3K 或 4K")
+    ratio = "9:16" if orientation == "portrait" else "16:9"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "size": tier,
+        "ratio": ratio,
+        "extra_body": {"response_format": "b64_json"},
+    }
+    if input_paths:
+        payload["extra_body"]["image"] = [_image_data_uri(path) for path in input_paths]
+
+    request = urllib.request.Request(
+        _agnes_images_endpoint(base_url),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        get_agnes_image_limiter(tier).wait()
+        with urllib.request.urlopen(request, timeout=360) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Agnes 图像模型 '{model}' 调用失败: HTTP {error.code}: {detail}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Agnes 图像模型 '{model}' 连接失败: {error}") from error
+
+    items = result.get("data") or []
+    if not items:
+        raise RuntimeError(f"Agnes 图像接口未返回 data[0]: {result}")
+    item = items[0]
+    tmp_path = output_path + ".raw"
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if item.get("b64_json"):
+        with open(tmp_path, "wb") as handle:
+            handle.write(base64.b64decode(item["b64_json"]))
+    elif item.get("url"):
+        _download(item["url"], tmp_path)
+    else:
+        raise RuntimeError(f"Agnes 图像接口未返回 data[0].url/b64_json: {result}")
+    try:
+        _flatten_to_rgb(tmp_path, output_path)
+    finally:
+        _safe_remove_file(tmp_path)
+    return output_path
 
 
 def _safe_historical_prompt(prompt):
@@ -163,7 +245,7 @@ def _choose_sizes(model, orientation):
 
 def generate_scene_image(prompt, output_path, orientation="landscape",
                          api_key=None, base_url=None, quality=None,
-                         image_model=None):
+                         image_model=None, image_size_tier="1K"):
     """用 AI 模型生成单张场景画面。
 
     Args:
@@ -178,15 +260,25 @@ def generate_scene_image(prompt, output_path, orientation="landscape",
     Returns:
         str: 保存的图片路径
     """
-    client = get_client(api_key, base_url)
+    prompt = optimize_chinese_visual_prompt(prompt)
     model = image_model or IMAGE_MODEL
-    if _is_nvidia(base_url, api_key):
+    resolved_key = (api_key or OPENAI_API_KEY or "").strip()
+    resolved_url = (base_url or OPENAI_BASE_URL or "").strip()
+    if not resolved_key:
+        raise ValueError("未配置图像 API Key")
+    if _is_agnes(resolved_url, model):
+        return _agnes_generate(
+            prompt, output_path, resolved_key, resolved_url, model,
+            orientation=orientation, size_tier=image_size_tier,
+        )
+    if _is_nvidia(resolved_url, resolved_key):
         if orientation == "portrait":
             nvidia_width, nvidia_height = 1024, 1024
         else:
             nvidia_width, nvidia_height = 1024, 1024
-        return _nvidia_generate(prompt, output_path, api_key, model,
+        return _nvidia_generate(prompt, output_path, resolved_key, model,
                                  width=nvidia_width, height=nvidia_height)
+    client = get_client(resolved_key, resolved_url)
     model_l = model.lower()
 
     sizes = _choose_sizes(model, orientation)
@@ -222,7 +314,8 @@ def generate_scene_image(prompt, output_path, orientation="landscape",
     )
 
 
-def test_image_model(api_key=None, base_url=None, image_model=None):
+def test_image_model(api_key=None, base_url=None, image_model=None,
+                     image_size_tier="1K"):
     """快速测试图像模型是否可用，返回识别到的能力信息。
 
     用于前端的「连接测试」按钮，避免跑完整流程才发现模型名不对。
@@ -230,14 +323,29 @@ def test_image_model(api_key=None, base_url=None, image_model=None):
     Returns:
         dict: {'model', 'response_type'(url/b64_json), 'size', 'supported': True}
     """
-    client = get_client(api_key, base_url)
     model = image_model or IMAGE_MODEL
-    if _is_nvidia(base_url, api_key):
+    resolved_key = (api_key or OPENAI_API_KEY or "").strip()
+    resolved_url = (base_url or OPENAI_BASE_URL or "").strip()
+    if _is_agnes(resolved_url, model):
+        import tempfile
+        test_path = os.path.join(tempfile.gettempdir(), "agnes_image_test.png")
+        try:
+            _agnes_generate(
+                "A simple red circle on a white background, test pattern.",
+                test_path, resolved_key, resolved_url, model,
+                orientation="landscape", size_tier=image_size_tier,
+            )
+            return {"model": model, "response_type": "b64_json",
+                    "size": str(image_size_tier).upper(), "supported": True}
+        finally:
+            _safe_remove_file(test_path)
+    client = get_client(resolved_key, resolved_url)
+    if _is_nvidia(resolved_url, resolved_key):
         import tempfile
         test_path = os.path.join(tempfile.gettempdir(), "nvidia_image_test.png")
         try:
             _nvidia_generate("A simple red circle on a white background, test pattern.",
-                             test_path, api_key, model, width=1024, height=1024)
+                             test_path, resolved_key, model, width=1024, height=1024)
             return {"model": model, "response_type": "base64", "supported": True}
         finally:
             _safe_remove_file(test_path)
@@ -286,7 +394,7 @@ def test_image_model(api_key=None, base_url=None, image_model=None):
 def generate_all_scenes(scenes, output_dir, orientation="landscape",
                         api_key=None, base_url=None, quality=None,
                         image_model=None, progress_callback=None,
-                        content_filter_callback=None):
+                        content_filter_callback=None, image_size_tier="1K"):
     """为所有场景生成 AI 画面。
 
     Args:
@@ -327,7 +435,7 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
                 generate_scene_image(
                     prompt, out_path, orientation,
                     api_key=api_key, base_url=base_url, quality=quality,
-                    image_model=image_model
+                    image_model=image_model, image_size_tier=image_size_tier,
                 )
                 scene['image_path'] = out_path
                 break
@@ -372,9 +480,9 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
 
 
 def colorize_page(image_path, output_path, api_key=None, base_url=None,
-                  image_model=None, style="traditional Chinese gongbi watercolor"):
+                  image_model=None, style="traditional Chinese gongbi watercolor",
+                  image_size_tier="1K"):
     """使用支持 images.edit 的模型给黑白页面设色，同时保留原线稿和构图。"""
-    client = get_client(api_key, base_url)
     model = image_model or IMAGE_MODEL
     prompt = (
         "Colorize this black-and-white Chinese gongbi illustration. "
@@ -382,6 +490,17 @@ def colorize_page(image_path, output_path, api_key=None, base_url=None,
         "composition and historical detail exactly. Add tasteful natural colors "
         f"in a {style} style. Do not redraw, crop, add, remove, blur or change any text."
     )
+    resolved_key = (api_key or OPENAI_API_KEY or "").strip()
+    resolved_url = (base_url or OPENAI_BASE_URL or "").strip()
+    if _is_agnes(resolved_url, model):
+        with Image.open(image_path) as source_image:
+            orientation = "portrait" if source_image.height > source_image.width else "landscape"
+        return _agnes_generate(
+            prompt, output_path, resolved_key, resolved_url, model,
+            orientation=orientation, size_tier=image_size_tier,
+            input_paths=[image_path],
+        )
+    client = get_client(resolved_key, resolved_url)
     with open(image_path, "rb") as source:
         try:
             response = client.images.edit(
@@ -396,7 +515,8 @@ def colorize_page(image_path, output_path, api_key=None, base_url=None,
 
 
 def colorize_pages(image_paths, output_dir, api_key=None, base_url=None,
-                   image_model=None, progress_callback=None):
+                   image_model=None, progress_callback=None,
+                   image_size_tier="1K"):
     os.makedirs(output_dir, exist_ok=True)
     result = []
     total = len(image_paths)
@@ -406,7 +526,7 @@ def colorize_pages(image_paths, output_dir, api_key=None, base_url=None,
         if progress_callback:
             progress_callback(index, total, f"美化彩色页面 {index + 1}/{total}", None)
         colorize_page(image_path, output_path, api_key=api_key, base_url=base_url,
-                      image_model=image_model)
+                      image_model=image_model, image_size_tier=image_size_tier)
         result.append(output_path)
         if progress_callback:
             progress_callback(index + 1, total, f"彩色页面完成 {index + 1}/{total}", output_path)

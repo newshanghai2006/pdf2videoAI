@@ -124,6 +124,7 @@ python app.py
 | **美化为彩色图片** | 可选。将每页黑白连环画提交给支持图片编辑的图像模型设色，尽量保留原线稿和构图 |
 | **LLM 模型** | 剧情理解用的模型。**默认 `gpt-5.5`**，可从常用模型下拉选择，也可编辑输入框填写任意模型名 |
 | **图像模型** | 画面生成用的模型。**默认 `gpt-image-1`**，可从常用模型下拉选择，也可编辑输入框填写任意模型名 |
+| **Agnes 图片尺寸** | Agnes 生图/美化专用的 1K、2K、3K、4K 档位；默认 1K，档位越高免费 RPM 越低 |
 | **连接测试** | 点此按钮可快速验证 Key 与两个模型是否可用，**无需跑完整流程**，是排查"模型名不对"报错的最快方式 |
 | **页码范围** | 选择要处理的 PDF 页范围（建议先选 3-5 页测试） |
 | **AI 剧情分析** | 可选。关闭后按手动分段参数和 OCR 文本制作视频，不需要 LLM Key |
@@ -133,7 +134,7 @@ python app.py
 | **OCR 文字语言** | 简体/中文、繁体中文或英文 |
 | **画面方向** | 横屏（1920×1080 / 1280×720）或 竖屏（1080×1920 / 720×1280） |
 | **画质** | 1080p 或 720p |
-| **视频引擎** | 可选“静态全画面”（完整显示、不运动、不裁剪）、默认 `Ken Burns` 缓动运镜，或 Seedance 占位引擎 |
+| **视频引擎** | 可选“静态全画面”、默认 `Ken Burns`、Seedance 占位引擎，或已接入的 `Agnes Video V2.0` 异步视频引擎 |
 | **艺术风格** | 见下方风格列表 |
 | **生成AI视频提示词** | 可选开关。勾选后额外产出一份**中英双语视频提示词**（含镜头运动/时长/负向词），可复制粘贴到火山 Seedance / 即梦 / 可灵 / Runway 等**网页版**工具手动生成视频——不走 API、零额外费用。完成后在第四步「下载AI视频提示词」 |
 | **TTS 配音** | 开关 + **旁白语音** + **对白语音**（两者用不同声音）+ 语速 |
@@ -175,6 +176,90 @@ AI 封面默认明确禁止生成文字、字母、Logo 和字幕，以避免图
 和图像 Base URL 可以留空，后端会沿用 LLM 的 `nvapi-...` Key，并自动请求 NVIDIA 的
 专用图像端点。完整链路为：OCR → NVIDIA/其他 LLM 生成场景提示词 → NVIDIA Flux 生图
 → TTS → 静态或 Ken Burns 视频合成。
+
+### Agnes AI 免费模型配置
+
+界面的“服务商预设”选择 **Agnes AI** 后，会自动填入三个模型和统一 API 根地址：
+
+```text
+LLM Base URL:   https://apihub.agnes-ai.com/v1
+LLM 模型:       agnes-2.0-flash
+图像 Base URL:  https://apihub.agnes-ai.com/v1
+图像模型:       agnes-image-2.0-flash
+视频 Base URL:  https://apihub.agnes-ai.com/v1
+视频模型:       agnes-video-v2.0
+```
+
+同一个 Agnes Key 可用于文本、图片和视频。图像 Key、视频 Key 留空时会复用 LLM Key；
+是否使用 AI 图片和 Agnes 视频仍由“启用 AI 画面生成”和“视频引擎”两个选项独立控制。
+
+程序按 Agnes 官方 2026-07-27 公开文档中的免费/default Key **实际 RPM** 在进程内限速：
+
+| 能力 | 免费实际限制 | 程序处理 |
+|------|-------------|----------|
+| `agnes-2.0-flash` 文本 | 20 RPM | 剧情分析、连接测试和重试共享限速器；429 等待一分钟后只重试一次 |
+| 图片 1K | 20 RPM | 每次生图、图生图和测试均限速 |
+| 图片 2K | 10 RPM | 与 1K 使用独立档位限速器 |
+| 图片 3K / 4K | 1 RPM | 每次请求至少间隔约一分钟，批量处理会明显变慢 |
+| `agnes-video-v2.0` 视频 | 1 RPM | 任务提交和每次状态轮询都经过同一限速器 |
+
+相同类型的多个免费 Key 在 Agnes 账户侧共享限制池，创建更多 Key 不会增加 RPM。程序的
+限速器只能协调当前 Flask 进程；若同一 Key 还被其他程序使用，服务端仍可能返回 429。
+
+Agnes Image 使用官方 `POST /v1/images/generations`。文生图发送 `size` 档位和 `ratio`，
+图生图/“美化为彩色图片”把本地页面编码为 Data URI，放入
+`extra_body.image`；`response_format` 按官方要求放在 `extra_body` 内，不放在顶层。
+横屏使用 16:9，竖屏使用 9:16。常用实际输出如下：
+
+| 档位 | 16:9 | 9:16 |
+|------|------|------|
+| 1K | 1312×736 | 736×1312 |
+| 2K | 2624×1472 | 1472×2624 |
+| 3K | 3936×2208 | 2208×3936 |
+| 4K | 5248×2944 | 2944×5248 |
+
+服务端可能把不受支持的精确像素尺寸标准化到最近的档位。最终影片仍由 FFmpeg 缩放到界面
+选择的 720p/1080p。长 PDF 建议先使用 1K；3K/4K 不但约一分钟一张，也会显著增加内存、
+网络传输和临时文件体积。
+
+Agnes Video 使用异步流程：`POST /v1/videos` 创建任务，再通过
+`GET /agnesapi?video_id=...` 获取状态，完成后下载 `metadata.url`。程序会：
+
+- 根据场景目标时长计算 `num_frames`，自动满足 `8n+1` 且不超过 441 帧。
+- 帧率可选 24/30 fps；24 fps 时单次模型视频最长约 18.4 秒。
+- 生成分辨率可选 480p、720p、1080p，服务端仍可能映射到最接近的标准尺寸。
+- 下载后统一转为项目尺寸、25 fps、H.264/yuv420p，并精确裁剪或延长到场景/TTS 时长。
+- 超过模型单次时长时保留生成视频，并以最后一帧延长剩余画面，避免截断旁白。
+
+免费视频为 1 RPM，而且提交与轮询都计入程序限速。一个场景通常至少等待一次约一分钟的
+轮询；20 个场景可能需要几十分钟，页面显示 queued/in_progress/progress 时请勿重启服务。
+连接测试不会创建视频任务，只检查 Key、URL 和模型配置格式，实际鉴权在首次生成时完成。
+
+Agnes 图生视频要求图片是**公网可访问 URL**。本项目的 PDF 页面和 AI 图片默认是本地文件，
+不会上传到公网，因此 Agnes 引擎当前使用场景 `image_prompt` 做文生视频；只有场景已有
+`image_url`/`source_image_url` 公网地址时才自动走图生视频。这样不会隐式泄露用户 PDF。
+
+#### 中国历史场景提示词优化
+
+为避免图像或视频模型把中国故事生成成欧美人物、西方骑士或欧洲城堡，程序在三层统一处理：
+
+1. 剧情分析要求 LLM 识别中国朝代、地域、人物身份、服饰、发式、建筑和器物，并在每个
+   `image_prompt` 中明确写出 Chinese people / Chinese historical setting，而不是只写 Asian。
+2. 调用 OpenAI、NVIDIA 或 Agnes 图片模型前，程序再次追加固定的
+   `CULTURAL ACCURACY` 约束。即使某个 LLM 输出过于简略，生图请求仍会带上中国文化约束。
+3. Agnes 视频和导出的网页版视频提示词加入负向约束，排除非原作要求的欧美人物、金发碧眼、
+   西方中世纪盔甲/城堡、古罗马/维京服饰、日本武士/和服、韩服、现代西装和时代混搭。
+
+默认电影、动漫、油画和漫画风格也已移除“好莱坞”“日本动画”“美漫”等容易造成文化偏移
+的描述。约束保留一个必要例外：如果原作明确写了外国人物或外国场景，应按原作身份生成，
+不会强行把该人物改成中国人。固定规则位于 `core/prompt_optimizer.py`，可按具体作品调整。
+
+适配依据：
+
+- <https://agnes-ai.com/zh-Hans/docs/agnes-20-flash>
+- <https://agnes-ai.com/zh-Hans/docs/agnes-image-20-flash>
+- <https://agnes-ai.com/zh-Hans/docs/agnes-video-v20>
+- <https://wiki.agnes-ai.com/zh-Hans/docs/tokenplan>
 
 程序支持服务商提供的自定义 API 根路径，例如：
 
@@ -220,7 +305,8 @@ LLM 模型:       kimi-k2
 没有图像服务 Key 时关闭“启用 AI 画面生成”即可继续流程：LLM 负责剧情分析，视频使用
 PDF 原页面，并可继续进行 TTS 配音和 Ken Burns 合成。连接测试在关闭该选项时也会跳过图像接口。
 
-勾选“美化为彩色图片”后，程序调用图像模型的 `images.edit` 接口逐页设色；该功能不是
+勾选“美化为彩色图片”后，普通 OpenAI 兼容模型调用 `images.edit`，Agnes Image 则通过
+`/images/generations` 的 `extra_body.image` 进行图生图设色；该功能不是
 普通文本 LLM 能完成的，必须使用支持图片编辑的图像模型和网关。它与“启用 AI 画面生成”
 互斥，二者同时勾选时界面会自动关闭另一个选项。
 
@@ -345,6 +431,17 @@ set OPENAI_API_KEY=sk-...
 set OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
+Agnes 可使用：
+
+```bash
+$env:OPENAI_API_KEY = "your-agnes-api-key"
+$env:OPENAI_BASE_URL = "https://apihub.agnes-ai.com/v1"
+$env:LLM_MODEL = "agnes-2.0-flash"
+$env:IMAGE_MODEL = "agnes-image-2.0-flash"
+$env:AGNES_API_KEY = "your-agnes-api-key"
+$env:AGNES_VIDEO_MODEL = "agnes-video-v2.0"
+```
+
 设置后重启服务生效。界面中填写的 Key 优先级高于环境变量。
 
 ---
@@ -367,7 +464,9 @@ pdf2video/
 │   ├── pdf_processor.py        # PDF → 页面图片（默认进程内 PyMuPDF，必要时降级到 pdf_helper.py）
 │   ├── ocr_processor.py        # OCR 文字识别（RapidOCR）
 │   ├── story_analyzer.py       # AI 剧情理解（OpenAI Chat Completions 兼容接口）
-│   ├── image_generator.py      # AI 画面生成（OpenAI Images 兼容接口）
+│   ├── image_generator.py      # OpenAI/NVIDIA/Agnes 生图与 Agnes 图生图
+│   ├── prompt_optimizer.py     # 中国历史人物、服饰、建筑文化准确性提示词约束
+│   ├── rate_limiter.py         # NVIDIA / Agnes 进程内 RPM 限速器
 │   ├── tts_engine.py           # TTS 配音（旁白/对白双声音，去角色名前缀）
 │   ├── subtitle_builder.py     # 按场景实际时长生成 SRT 字幕
 │   ├── video_prompt.py         # 生成可粘贴到网页版AI视频工具的中英双语提示词（本地拼装）
@@ -377,7 +476,8 @@ pdf2video/
 │       ├── base.py             #   引擎接口 VideoEngine.generate_clip
 │       ├── static.py           #   静态全画面（完整显示、不运动）
 │       ├── kenburns.py         #   Ken Burns 运镜（默认）
-│       └── seedance.py         #   火山 Seedance 占位（接入扩展点）
+│       ├── seedance.py         #   火山 Seedance 占位（接入扩展点）
+│       └── agnes.py            #   Agnes Video V2.0 异步任务、轮询、下载和规整
 │
 ├── templates/
 │   └── index.html              # Web 界面
@@ -691,7 +791,11 @@ export PDF_HELPER_PYTHON=/path/to/other/python3
 - 每个引擎实现 `VideoEngine.generate_clip(scene, out_path, width, height, duration, ...)`，
   职责是把一个场景渲染成一段**时长恰为 `duration` 秒的无声视频**；配音对齐、拼接、
   BGM 混音由 `video_builder` 统一处理，引擎不必关心。
-- 内置 `kenburns`（默认）与 `seedance`（占位）。
+- 内置 `static`、`kenburns`（默认）、`seedance`（占位）和已可用的 `agnes`。
+
+`agnes` 的真实调用实现在 `core/video_engines/agnes.py`：负责提交、按免费 1 RPM 轮询、
+下载和 FFmpeg 规整。它遵守与其他引擎相同的“输出精确 duration 秒无声片段”契约，所以上层
+TTS 对齐、字幕、拼接和 BGM 混音不需要 Agnes 专用分支。
 
 接入火山 Seedance 的步骤：
 1. 在 `core/video_engines/seedance.py` 的 `_submit_task` / `_poll_task` 里实现火山的

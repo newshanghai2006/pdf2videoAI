@@ -11,12 +11,14 @@ video_builder 负责统一的音轨对齐、拼接与 BGM 混音，与具体引�
 新增引擎：在本目录新建模块实现 VideoEngine.generate_clip，并在 _REGISTRY 登记。
 """
 from .base import VideoEngine
+from .agnes import AgnesVideoEngine
 from .kenburns import KenBurnsEngine
 from .seedance import SeedanceEngine
 from .static import StaticEngine
 
 # 引擎名 → 类
 _REGISTRY = {
+    "agnes": AgnesVideoEngine,
     "kenburns": KenBurnsEngine,
     "static": StaticEngine,
     "seedance": SeedanceEngine,

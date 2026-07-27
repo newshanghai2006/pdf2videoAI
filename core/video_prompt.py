@@ -10,6 +10,12 @@
   - build_prompts_document(scenes, ...) -> str：整篇可直接复制的文本文档
 """
 
+from .prompt_optimizer import (
+    CHINESE_VISUAL_NEGATIVE_CN,
+    CHINESE_VISUAL_NEGATIVE_EN,
+    optimize_chinese_visual_prompt,
+)
+
 # mood -> (中文氛围, 英文 atmosphere)
 _MOOD_MAP = {
     "tense":      ("紧张", "tense, suspenseful atmosphere"),
@@ -38,11 +44,12 @@ _DEFAULT_MOOD = ("电影感", "cinematic atmosphere")
 # 通用负向词（画质/畸变类），适配大多数视频工具
 _NEGATIVE = (
     "低画质, 模糊, 变形, 多余的手指, 畸变肢体, 文字水印, 字幕, LOGO, "
-    "闪烁, 拼接痕迹, 过曝, 噪点"
+    "闪烁, 拼接痕迹, 过曝, 噪点, " + CHINESE_VISUAL_NEGATIVE_CN
 )
 _NEGATIVE_EN = (
     "low quality, blurry, distorted, extra fingers, deformed limbs, "
-    "text, watermark, subtitles, logo, flicker, artifacts, overexposed, noise"
+    "text, watermark, subtitles, logo, flicker, artifacts, overexposed, noise, "
+    + CHINESE_VISUAL_NEGATIVE_EN
 )
 
 
@@ -65,7 +72,7 @@ def build_scene_prompt(scene, art_style_desc="", index=0):
     scene_no = scene.get("scene_number", index + 1)
 
     narration = _clean(scene.get("narration"))
-    image_prompt = _clean(scene.get("image_prompt"))
+    image_prompt = optimize_chinese_visual_prompt(scene.get("image_prompt"))
 
     # 台词（去掉说话人，只保留内容会更适合画面描述；此处保留原文供参考）
     dialogues = [d for d in (scene.get("dialogue") or []) if _clean(d)]

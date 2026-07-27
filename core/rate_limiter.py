@@ -23,3 +23,20 @@ class IntervalRateLimiter:
 
 # NVIDIA 免费 API 限制为 40 RPM。LLM 与图像请求共用额度，保留 0.05 秒余量。
 nvidia_limiter = IntervalRateLimiter(40, safety_seconds=0.05)
+
+# Agnes AI 免费/default Key 的当前公开“实际 RPM”。不同能力和图片档位
+# 使用不同额度池；同一进程中的并发任务共享这些 limiter。
+agnes_text_limiter = IntervalRateLimiter(20, safety_seconds=0.10)
+agnes_image_limiters = {
+    "1K": IntervalRateLimiter(20, safety_seconds=0.10),
+    "2K": IntervalRateLimiter(10, safety_seconds=0.10),
+    "3K": IntervalRateLimiter(1, safety_seconds=0.25),
+    "4K": IntervalRateLimiter(1, safety_seconds=0.25),
+}
+agnes_video_limiter = IntervalRateLimiter(1, safety_seconds=0.25)
+
+
+def get_agnes_image_limiter(size_tier):
+    """返回 Agnes 图片档位对应的免费 RPM 限速器。"""
+    return agnes_image_limiters.get(str(size_tier or "1K").upper(),
+                                    agnes_image_limiters["1K"])

@@ -2,11 +2,13 @@
 """故事分析器：用 LLM 理解 OCR 文字，拆分为场景，生成画面提示词"""
 import json
 import os
+import time
 from openai import APIStatusError, BadRequestError, OpenAI
 import httpx
 
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL, ART_STYLES
-from .rate_limiter import nvidia_limiter
+from .prompt_optimizer import optimize_chinese_visual_prompt
+from .rate_limiter import agnes_text_limiter, nvidia_limiter
 
 
 def get_client(api_key=None, base_url=None):
@@ -23,10 +25,12 @@ def get_client(api_key=None, base_url=None):
         raise ValueError("API Base URL 必须以 http:// 或 https:// 开头")
     timeout = httpx.Timeout(connect=15.0, read=300.0, write=60.0, pool=15.0)
     is_nvidia = "nvidia" in url.lower() or key.startswith("nvapi-")
-    # SDK 内置重试不会经过限速器；NVIDIA 改为关闭内置重试，避免突破 RPM。
+    is_agnes = "agnes-ai.com" in url.lower()
+    # SDK 内置重试不会经过限速器；受控服务关闭内置重试，避免突破 RPM。
     client = OpenAI(api_key=key, base_url=url, timeout=timeout,
-                    max_retries=0 if is_nvidia else 1)
+                    max_retries=0 if (is_nvidia or is_agnes) else 1)
     client._pdf2video_is_nvidia = is_nvidia
+    client._pdf2video_is_agnes = is_agnes
     return client
 
 
@@ -74,19 +78,32 @@ def _chat(client, model, messages, temperature=0.7, json_mode=False,
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
-    try:
+    def create():
         if getattr(client, "_pdf2video_is_nvidia", False):
             nvidia_limiter.wait()
-        return _collect_stream(client.chat.completions.create(**kwargs))
+        if getattr(client, "_pdf2video_is_agnes", False):
+            agnes_text_limiter.wait()
+        try:
+            return _collect_stream(client.chat.completions.create(**kwargs))
+        except APIStatusError as error:
+            # Agnes 免费额度被其他进程/客户端共享时，均匀限速仍可能收到 429。
+            # 按官方建议等待一分钟后只重试一次，且重试同样经过 limiter。
+            if (getattr(client, "_pdf2video_is_agnes", False)
+                    and error.status_code in (429, 503)):
+                time.sleep(60 if error.status_code == 429 else 5)
+                agnes_text_limiter.wait()
+                return _collect_stream(client.chat.completions.create(**kwargs))
+            raise
+
+    try:
+        return create()
     except Exception as e:
         # 少数兼容网关虽然使用 GPT-5 名称，但只实现了旧参数。
         if _unsupported_parameter(e, token_parameter):
             kwargs.pop(token_parameter)
             fallback = "max_tokens" if token_parameter == "max_completion_tokens" else "max_completion_tokens"
             kwargs[fallback] = max_tokens
-            if getattr(client, "_pdf2video_is_nvidia", False):
-                nvidia_limiter.wait()
-            return _collect_stream(client.chat.completions.create(**kwargs))
+            return create()
         raise
 
 
@@ -263,6 +280,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 3. 严格按输入 PDF 页拆分场景：每一页对应一个场景，不得漏页、合并页或把一页拆成多个场景
 4. 为每个场景编写旁白文字（用于配音）
 5. 为每个场景生成详细的英文画面提示词（用于AI图像生成）
+6. 识别故事的中国朝代、地域和人物身份；除非原文明确是外国人物，否则不得生成欧美人、
+   西方骑士、日本武士或其他不符合原作的族群、服装、盔甲和建筑
 
 艺术风格要求：{style_desc}
 
@@ -277,7 +296,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
       "page_source": 1,
       "narration": "这一场景的旁白文字（中文，用于TTS配音，描述发生了什么）",
       "dialogue": ["角色名: 台词内容"],
-      "image_prompt": "A detailed English prompt for AI image generation. Describe the scene vividly: characters, action, setting, lighting, composition, atmosphere. Style: {style_desc}. Make it cinematic and visually stunning.",
+      "image_prompt": "A detailed English prompt for AI image generation. State the Chinese dynasty or historical period, Chinese character appearance, accurate clothing, hairstyle, architecture and props, then describe action, lighting and composition. Style: {style_desc}.",
       "mood": "tense|calm|heroic|tragic|joyful|mysterious|epic",
       "duration": 5
     }}
@@ -287,6 +306,9 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 注意事项：
 - 场景数量必须与输入页数相同，每页严格一个场景；page_source 必须填写该页输入中显示的真实页码
 - image_prompt 必须是英文，描述要详细具体，包含人物外貌、动作、场景环境、光影效果
+- image_prompt 必须明确写出 Chinese people / Chinese historical setting，并尽量写明朝代；
+  未明确出现外国人物时，必须排除 Caucasian/European faces、Western medieval armor/castles、
+  Japanese samurai/kimono、Korean hanbok 和现代服装，不能只写含糊的 Asian
 - narration 是中文旁白，用于配音，应当流畅自然，像讲故事一样
 - 如果OCR文字不完整，请根据上下文和常识合理推断补充
 - duration 根据场景复杂度建议3-8秒"""
@@ -361,10 +383,10 @@ def refine_scene_prompt(scene, art_style="cinematic", api_key=None, base_url=Non
     content = _chat(
         client, model,
         messages=[
-            {"role": "system", "content": f"You are an expert at writing image-generation prompts. Enhance the following prompt to be more vivid and specific. Style: {style_desc}. Return only the prompt text."},
+            {"role": "system", "content": f"You are an expert at writing image-generation prompts for Chinese historical stories. Enhance the prompt while preserving the correct Chinese dynasty, ethnicity, facial appearance, clothing, hairstyle, architecture and props. Do not westernize people or settings unless the source explicitly identifies a foreign character. Style: {style_desc}. Return only the prompt text."},
             {"role": "user", "content": scene.get('image_prompt', '')},
         ],
         temperature=0.8,
     )
 
-    return content.strip()
+    return optimize_chinese_visual_prompt(content)

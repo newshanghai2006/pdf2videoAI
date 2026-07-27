@@ -17,9 +17,9 @@ let state = {
 };
 
 // ===== 初始化 =====
-document.addEventListener('DOMContentLoaded', () => {
-    loadConfig();
-    loadSavedSettings();
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadConfig();
+    await loadSavedSettings();
     setupUpload();
     setupStepNavigation();
     setupConfigControls();
@@ -86,7 +86,7 @@ function collectDecisionPrompt() {
 const savedSettingFields = [
     'llmApiKey', 'llmBaseUrl', 'llmModel',
     'imageApiKey', 'imageBaseUrl', 'imageModel',
-    'seedanceKey', 'seedanceBaseUrl', 'seedanceModel',
+    'videoApiKey', 'videoBaseUrl', 'videoModel',
 ];
 
 async function loadSavedSettings() {
@@ -96,7 +96,7 @@ async function loadSavedSettings() {
         const mapping = {
             llmApiKey: 'llm_api_key', llmBaseUrl: 'llm_base_url', llmModel: 'llm_model',
             imageApiKey: 'image_api_key', imageBaseUrl: 'image_base_url', imageModel: 'image_model',
-            seedanceKey: 'seedance_api_key', seedanceBaseUrl: 'seedance_base_url', seedanceModel: 'seedance_model',
+            videoApiKey: 'video_api_key', videoBaseUrl: 'video_base_url', videoModel: 'video_model',
         };
         for (const [id, key] of Object.entries(mapping)) {
             const element = document.getElementById(id);
@@ -111,7 +111,7 @@ async function saveSettings() {
     const mapping = {
         llmApiKey: 'llm_api_key', llmBaseUrl: 'llm_base_url', llmModel: 'llm_model',
         imageApiKey: 'image_api_key', imageBaseUrl: 'image_base_url', imageModel: 'image_model',
-        seedanceKey: 'seedance_api_key', seedanceBaseUrl: 'seedance_base_url', seedanceModel: 'seedance_model',
+        videoApiKey: 'video_api_key', videoBaseUrl: 'video_base_url', videoModel: 'video_model',
     };
     const data = {};
     for (const [id, key] of Object.entries(mapping)) {
@@ -175,12 +175,23 @@ async function loadConfig() {
             engSelect.value = data.default_video_engine || 'kenburns';
             const syncEngineUi = () => {
                 const isSeedance = engSelect.value === 'seedance';
-                document.getElementById('seedanceConfig').style.display =
-                    isSeedance ? 'block' : 'none';
+                const isAgnes = engSelect.value === 'agnes';
+                document.getElementById('videoServiceConfig').style.display =
+                    (isSeedance || isAgnes) ? 'block' : 'none';
+                if (isAgnes) {
+                    if (!document.getElementById('videoBaseUrl').value) {
+                        document.getElementById('videoBaseUrl').value = data.agnes_base_url || 'https://apihub.agnes-ai.com/v1';
+                    }
+                    if (!document.getElementById('videoModel').value) {
+                        document.getElementById('videoModel').value = 'agnes-video-v2.0';
+                    }
+                }
                 if (engHint) {
-                    engHint.textContent = isSeedance
-                        ? '火山 Seedance 生成真实动态视频（需填 API Key；未接入前自动降级为 Ken Burns）'
-                        : '本地图像 + 缓动运镜，无需额外 API';
+                    engHint.textContent = isAgnes
+                        ? 'Agnes 异步生成真实动态视频；免费默认 1 RPM，单个场景可能需要数分钟'
+                        : (isSeedance
+                            ? '火山 Seedance 生成真实动态视频（需填 API Key；未接入前自动降级为 Ken Burns）'
+                            : '本地图像 + 缓动运镜，无需额外 API');
                 }
             };
             engSelect.addEventListener('change', syncEngineUi);
@@ -225,6 +236,14 @@ async function loadConfig() {
             }
         }
 
+        const videoPreset = document.getElementById('videoModelPreset');
+        for (const [key, desc] of Object.entries(data.agnes_video_models || {})) {
+            const option = document.createElement('option');
+            option.value = key;
+            option.textContent = `${key} - ${desc}`;
+            videoPreset.appendChild(option);
+        }
+
         // 根据方向自动调整分辨率选项
         updateResolutionOptions('landscape');
 
@@ -234,7 +253,43 @@ async function loadConfig() {
         document.getElementById('imageModelPreset').addEventListener('change', (e) => {
             if (e.target.value) document.getElementById('imageModel').value = e.target.value;
         });
+        document.getElementById('videoModelPreset').addEventListener('change', (e) => {
+            if (e.target.value) document.getElementById('videoModel').value = e.target.value;
+        });
         document.getElementById('providerPreset').addEventListener('change', (e) => {
+            if (e.target.value === 'agnes') {
+                const baseUrl = data.agnes_base_url || 'https://apihub.agnes-ai.com/v1';
+                document.getElementById('llmBaseUrl').value = baseUrl;
+                document.getElementById('imageBaseUrl').value = baseUrl;
+                document.getElementById('videoBaseUrl').value = baseUrl;
+                const llmPreset = document.getElementById('llmModelPreset');
+                const imagePreset = document.getElementById('imageModelPreset');
+                const agnesVideoPreset = document.getElementById('videoModelPreset');
+                llmPreset.innerHTML = '<option value="">选择 Agnes 文本模型或手动输入</option>';
+                imagePreset.innerHTML = '<option value="">选择 Agnes 图像模型或手动输入</option>';
+                agnesVideoPreset.innerHTML = '<option value="">选择 Agnes 视频模型或手动输入</option>';
+                for (const [key, desc] of Object.entries(data.agnes_llm_models || {})) {
+                    const option = document.createElement('option'); option.value = key; option.textContent = `${key} - ${desc}`; llmPreset.appendChild(option);
+                }
+                for (const [key, desc] of Object.entries(data.agnes_image_models || {})) {
+                    const option = document.createElement('option'); option.value = key; option.textContent = `${key} - ${desc}`; imagePreset.appendChild(option);
+                }
+                for (const [key, desc] of Object.entries(data.agnes_video_models || {})) {
+                    const option = document.createElement('option'); option.value = key; option.textContent = `${key} - ${desc}`; agnesVideoPreset.appendChild(option);
+                }
+                const llm = Object.keys(data.agnes_llm_models || {})[0] || 'agnes-2.0-flash';
+                const image = Object.keys(data.agnes_image_models || {})[0] || 'agnes-image-2.0-flash';
+                const video = Object.keys(data.agnes_video_models || {})[0] || 'agnes-video-v2.0';
+                llmPreset.value = llm; imagePreset.value = image; agnesVideoPreset.value = video;
+                document.getElementById('llmModel').value = llm;
+                document.getElementById('imageModel').value = image;
+                document.getElementById('videoModel').value = video;
+                document.getElementById('imageApiKey').value = '';
+                document.getElementById('videoApiKey').value = '';
+                document.getElementById('useImageGeneration').checked = true;
+                document.getElementById('colorizePages').checked = false;
+                return;
+            }
             if (e.target.value !== 'nvidia') return;
             document.getElementById('llmBaseUrl').value = 'https://integrate.api.nvidia.com/v1';
             const llmPreset = document.getElementById('llmModelPreset');
@@ -512,7 +567,12 @@ async function runTestConnection() {
         colorize_pages: document.getElementById('colorizePages').checked,
         llm_model: document.getElementById('llmModel').value.trim(),
         image_model: document.getElementById('imageModel').value.trim(),
+        image_size_tier: document.getElementById('imageSizeTier').value,
         use_ai_analysis: document.getElementById('useAiAnalysis').checked,
+        video_engine: document.getElementById('videoEngine').value,
+        video_api_key: document.getElementById('videoApiKey').value.trim(),
+        video_base_url: document.getElementById('videoBaseUrl').value.trim(),
+        video_model: document.getElementById('videoModel').value.trim(),
     };
 
     try {
@@ -544,7 +604,13 @@ async function runTestConnection() {
             html += `<div class="test-err">❌ 图像模型 <b>${escapeHtml(data.image.model)}</b> 失败<br><span class="test-reply">${escapeHtml(data.image.error)}</span></div>`;
         }
 
-        html += '<p class="test-hint">两项均✅即可开始生成。若图像模型失败，请在上方改用你的代理支持的模型名（如 gpt-image-1 / dall-e-3）。</p>';
+        if (data.video && data.video.ok && data.video.configured) {
+            html += `<div class="test-ok">✅ 视频模型 <b>${escapeHtml(data.video.model)}</b> 配置有效<br><span class="test-reply">${escapeHtml(data.video.message)}</span></div>`;
+        } else if (data.video && !data.video.ok) {
+            html += `<div class="test-err">❌ 视频模型 <b>${escapeHtml(data.video.model)}</b> 配置失败<br><span class="test-reply">${escapeHtml(data.video.error)}</span></div>`;
+        }
+
+        html += '<p class="test-hint">图像测试会真实生成一张测试图；Agnes 视频测试只检查配置格式，不会创建耗时的视频任务。</p>';
 
         resultEl.innerHTML = html;
     } catch (e) {
@@ -573,7 +639,7 @@ function setupProcessButton() {
 async function startProcessing() {
     const apiKey = document.getElementById('llmApiKey').value.trim();
     if (document.getElementById('useAiAnalysis').checked && !apiKey) {
-        alert('请填写 OpenAI API Key');
+        alert('请填写 LLM API Key');
         return;
     }
 
@@ -599,6 +665,7 @@ async function startProcessing() {
         colorize_pages: document.getElementById('colorizePages').checked,
         llm_model: document.getElementById('llmModel').value.trim(),
         image_model: document.getElementById('imageModel').value.trim(),
+        image_size_tier: document.getElementById('imageSizeTier').value,
         art_style: artStyle,
         resolution: resolution,
         orientation: orientation,
@@ -620,9 +687,11 @@ async function startProcessing() {
         tts_voice: document.getElementById('ttsVoice').value,
         dialogue_voice: document.getElementById('dialogueVoice').value,
         video_engine: document.getElementById('videoEngine').value,
-        seedance_api_key: document.getElementById('seedanceKey').value.trim(),
-        seedance_base_url: document.getElementById('seedanceBaseUrl').value.trim(),
-        seedance_model: document.getElementById('seedanceModel').value.trim(),
+        video_api_key: document.getElementById('videoApiKey').value.trim(),
+        video_base_url: document.getElementById('videoBaseUrl').value.trim(),
+        video_model: document.getElementById('videoModel').value.trim(),
+        video_resolution_tier: document.getElementById('videoResolutionTier').value,
+        video_frame_rate: parseInt(document.getElementById('videoFrameRate').value) || 24,
         export_prompts: document.getElementById('exportPrompts').checked,
         bgm_path: state.bgmPath,
         bgm_volume: parseInt(document.getElementById('bgmVolume').value) / 100,

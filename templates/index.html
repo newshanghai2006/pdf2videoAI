@@ -73,6 +73,7 @@
                             <select id="providerPreset" class="input">
                                 <option value="">自定义 / OpenAI 兼容服务</option>
                                 <option value="nvidia">NVIDIA NIM（免费额度）</option>
+                                <option value="agnes">Agnes AI（免费文本 / 图片 / 视频）</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -123,6 +124,15 @@
                                    placeholder="留空则使用 LLM Base URL">
                         </div>
                         <div class="form-group">
+                            <label>Agnes 图片尺寸 <span class="hint">(仅 Agnes 生图/美化生效；分辨率越高 RPM 越低)</span></label>
+                            <select id="imageSizeTier" class="input">
+                                <option value="1K">1K（免费默认 20 RPM）</option>
+                                <option value="2K">2K（免费默认 10 RPM）</option>
+                                <option value="3K">3K（免费默认 1 RPM）</option>
+                                <option value="4K">4K（免费默认 1 RPM）</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
                             <label>
                                 <input type="checkbox" id="useImageGeneration">
                                 启用 AI 画面生成 <span class="hint">(关闭时使用 PDF 原页面，无需图像 Key)</span>
@@ -150,14 +160,37 @@
                             <select id="videoEngine" class="input"></select>
                             <p class="hint-text" id="videoEngineHint"></p>
                         </div>
-                        <div class="form-group" id="seedanceConfig" style="display:none;">
-                            <label>火山 Seedance API Key <span class="hint">(选 Seedance 引擎时填)</span></label>
-                            <input type="password" id="seedanceKey" class="input"
-                                   placeholder="火山 ARK / 视觉智能 Key" autocomplete="off">
-                            <input type="text" id="seedanceBaseUrl" class="input"
-                                   placeholder="视频服务 Base URL（可选）">
-                            <input type="text" id="seedanceModel" class="input"
-                                   placeholder="视频模型（可选，如 seedance）">
+                        <div class="form-group" id="videoServiceConfig" style="display:none;">
+                            <label>视频 API Key <span class="hint">(Agnes 可留空复用上方 LLM Key)</span></label>
+                            <input type="password" id="videoApiKey" class="input"
+                                   placeholder="视频服务 API Key" autocomplete="off">
+                            <label>视频 Base URL</label>
+                            <input type="text" id="videoBaseUrl" class="input"
+                                   placeholder="例如 https://apihub.agnes-ai.com/v1">
+                            <label>视频模型</label>
+                            <select id="videoModelPreset" class="input model-preset">
+                                <option value="">选择常用模型或手动输入</option>
+                            </select>
+                            <input type="text" id="videoModel" class="input"
+                                   placeholder="例如 agnes-video-v2.0">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Agnes 生成分辨率</label>
+                                    <select id="videoResolutionTier" class="input">
+                                        <option value="480p">480p（速度优先）</option>
+                                        <option value="720p" selected>720p（推荐）</option>
+                                        <option value="1080p">1080p（质量优先）</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Agnes 生成帧率</label>
+                                    <select id="videoFrameRate" class="input">
+                                        <option value="24" selected>24 fps（推荐）</option>
+                                        <option value="30">30 fps</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <p class="hint-text">免费默认视频额度为 1 RPM。单次最多 441 帧；超过模型单次时长的场景会在下载后本地延长到旁白所需时长。</p>
                         </div>
                         <div class="form-group">
                             <label>艺术风格</label>

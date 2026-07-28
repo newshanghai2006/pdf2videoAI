@@ -40,3 +40,22 @@ def get_agnes_image_limiter(size_tier):
     """返回 Agnes 图片档位对应的免费 RPM 限速器。"""
     return agnes_image_limiters.get(str(size_tier or "1K").upper(),
                                     agnes_image_limiters["1K"])
+
+
+# SenseNova 当前公开模型额度按 5 小时窗口计算。这里按窗口平均值均匀发送，
+# 避免批量 PDF 分析在短时间内集中消耗请求。实际账户窗口由服务端最终判定。
+sensenova_llm_limiters = {
+    "sensenova-6.7-flash-lite": IntervalRateLimiter(5, safety_seconds=0.20),
+    "sensenova-u1-fast": IntervalRateLimiter(5, safety_seconds=0.20),
+    "deepseek-v4-flash": IntervalRateLimiter(500 / 300, safety_seconds=0.20),
+}
+
+
+def get_sensenova_llm_limiter(model, is_sensenova_provider=False):
+    """返回 SenseNova 模型限速器；本地同名 DeepSeek 模型不误限速。"""
+    name = str(model or "").strip().lower()
+    if name.startswith("sensenova-"):
+        return sensenova_llm_limiters.get(name)
+    if is_sensenova_provider:
+        return sensenova_llm_limiters.get(name)
+    return None

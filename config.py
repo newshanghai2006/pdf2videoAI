@@ -36,6 +36,11 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
+# 公网部署默认禁止把网页中输入的 API Key 写入服务器文件。
+# 仅本地单用户需要兼容旧版客户端的 user_settings.json 接口时显式开启。
+ENABLE_SERVER_SETTINGS = os.environ.get(
+    "ENABLE_SERVER_SETTINGS", "false"
+).strip().lower() in ("1", "true", "yes", "on")
 
 # 视频分辨率
 RESOLUTIONS = {
@@ -108,6 +113,9 @@ LLM_MODELS = {
     "gpt-4o": "GPT-4o",
     "gpt-4o-mini": "GPT-4o mini（快速省钱）",
     "deepseek-chat": "DeepSeek Chat",
+    "sensenova-6.7-flash-lite": "SenseNova 6.7 Flash-Lite（1500次/5小时）",
+    "sensenova-u1-fast": "SenseNova U1 Fast（1500次/5小时）",
+    "deepseek-v4-flash": "SenseNova DeepSeek V4 Flash（500次/5小时）",
     "claude-3-5-sonnet": "Claude 3.5 Sonnet",
 }
 

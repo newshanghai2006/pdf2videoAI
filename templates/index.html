@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI 影片生成系统</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260728-1') }}">
 </head>
 <body>
     <div class="app">
@@ -67,7 +67,19 @@
                         <div class="form-group">
                             <label><input type="checkbox" id="useAiAnalysis" checked> 启用 AI 剧情分析 <span class="hint">(关闭后使用手动分段)</span></label>
                         </div>
-                        <p class="hint-text">本机配置会保存到 user_settings.json，下次打开自动填充。请勿在共享电脑或公网部署中使用。</p>
+                        <div class="form-group settings-storage-group">
+                            <label for="settingsStorageMode">API 配置保存方式</label>
+                            <div class="settings-storage-controls">
+                                <select id="settingsStorageMode" class="input">
+                                    <option value="session">仅当前标签页（公网推荐）</option>
+                                    <option value="local">保存在此浏览器</option>
+                                    <option value="none">不保存</option>
+                                </select>
+                                <button type="button" class="btn btn-outline" id="btnClearBrowserSettings">清除浏览器保存配置</button>
+                            </div>
+                            <p class="hint-text" id="settingsStorageHint"></p>
+                            <p class="hint-text">浏览器存储不是真正的密钥保险库；公网必须使用 HTTPS，并只加载可信脚本。API Key 不会默认写入服务器配置文件。</p>
+                        </div>
                         <div class="form-group">
                             <label>服务商预设</label>
                             <select id="providerPreset" class="input">
@@ -298,6 +310,7 @@
                         <p class="error-msg" id="decisionMsg"></p>
                         <textarea class="input" id="decisionPrompt" rows="5" style="display:none;"></textarea>
                         <div id="decisionScenes" class="decision-scenes" style="display:none;"></div>
+                        <button class="btn btn-primary" id="btnRetryAi" style="display:none;">重试当前步骤</button>
                         <button class="btn btn-primary" id="btnContinueWithoutAi">无 AI 继续</button>
                         <button class="btn btn-outline" id="btnAbortTask">退出任务</button>
                     </div>
@@ -393,6 +406,6 @@
         </footer>
     </div>
 
-    <script src="{{ url_for('static', filename='js/app.js', v='20260724-3') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js', v='20260728-1') }}"></script>
 </body>
 </html>

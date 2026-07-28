@@ -301,6 +301,23 @@ select.input {
     margin-top: 6px;
 }
 
+.settings-storage-controls {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto;
+    gap: 10px;
+    align-items: stretch;
+}
+
+.settings-storage-controls .btn {
+    white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+    .settings-storage-controls {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* ===== 连接测试结果 ===== */
 .test-result {
     margin-top: 12px;

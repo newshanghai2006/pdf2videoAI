@@ -417,6 +417,13 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
         out_path = os.path.join(output_dir, f"scene_{i + 1:04d}.png")
         prompt = scene.get('image_prompt', 'A beautiful Chinese historical scene')
 
+        # 用户点击“重试当前步骤”时保留已经成功生成的场景，只继续失败部分。
+        existing = scene.get('image_path')
+        if existing and os.path.exists(existing) and not scene.get('image_generation_warning'):
+            if progress_callback:
+                progress_callback(i + 1, total, f"复用已完成画面 {i + 1}/{total}", existing)
+            continue
+
         if scene.get('is_pdf_cover'):
             scene['image_path'] = scene.get('source_image_path')
             if progress_callback:
@@ -523,6 +530,12 @@ def colorize_pages(image_paths, output_dir, api_key=None, base_url=None,
     for index, image_path in enumerate(image_paths):
         page_number = os.path.splitext(os.path.basename(image_path))[0].split('_')[-1]
         output_path = os.path.join(output_dir, f"color_{page_number}.png")
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            result.append(output_path)
+            if progress_callback:
+                progress_callback(index + 1, total,
+                                  f"复用已完成彩色页面 {index + 1}/{total}", output_path)
+            continue
         if progress_callback:
             progress_callback(index, total, f"美化彩色页面 {index + 1}/{total}", None)
         colorize_page(image_path, output_path, api_key=api_key, base_url=base_url,

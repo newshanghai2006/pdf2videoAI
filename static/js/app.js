@@ -21,7 +21,8 @@ let state = {
 // ===== 初始化 =====
 document.addEventListener('DOMContentLoaded', async () => {
     await loadConfig();
-    await loadSavedSettings();
+    setupSettingsStorage();
+    loadSavedSettings();
     setupUpload();
     setupStepNavigation();
     setupConfigControls();
@@ -29,6 +30,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupCoverUpload();
     setupProcessButton();
     setupTestButton();
+    document.getElementById('btnRetryAi').addEventListener('click', () => submitDecision('retry'));
     document.getElementById('btnContinueWithoutAi').addEventListener('click', () => submitDecision('continue'));
     document.getElementById('btnAbortTask').addEventListener('click', () => submitDecision('abort'));
 });
@@ -76,7 +78,8 @@ async function submitDecision(decision) {
         }
         document.getElementById('decisionBox').style.display = 'none';
         document.getElementById('progressMessage').textContent =
-            decision === 'continue' ? '正在继续生成...' : '正在退出任务...';
+            decision === 'retry' ? '正在按服务商限速要求重试当前 AI 步骤...'
+                : (decision === 'continue' ? '正在继续生成...' : '正在退出任务...');
     } finally {
         state.decisionSubmitting = false;
         state.decisionEditing = false;
@@ -98,42 +101,145 @@ const savedSettingFields = [
     'videoApiKey', 'videoBaseUrl', 'videoModel',
 ];
 
-async function loadSavedSettings() {
+const settingsStorageKey = 'pdf2video_ai_settings_v2';
+const settingsStorageModeKey = 'pdf2video_settings_storage_mode';
+const allowedSettingsStorageModes = new Set(['session', 'local', 'none']);
+
+function getBrowserStorage(type) {
     try {
-        const res = await fetch('/api/settings');
-        const data = await res.json();
-        const mapping = {
-            llmApiKey: 'llm_api_key', llmBaseUrl: 'llm_base_url', llmModel: 'llm_model',
-            imageApiKey: 'image_api_key', imageBaseUrl: 'image_base_url', imageModel: 'image_model',
-            videoApiKey: 'video_api_key', videoBaseUrl: 'video_base_url', videoModel: 'video_model',
-        };
-        for (const [id, key] of Object.entries(mapping)) {
-            const element = document.getElementById(id);
-            if (element && data[key]) element.value = data[key];
-        }
+        return type === 'local' ? window.localStorage : window.sessionStorage;
     } catch (e) {
-        console.warn('加载本地配置失败:', e);
+        console.warn(`浏览器 ${type}Storage 不可用:`, e);
+        return null;
     }
 }
 
-async function saveSettings() {
-    const mapping = {
-        llmApiKey: 'llm_api_key', llmBaseUrl: 'llm_base_url', llmModel: 'llm_model',
-        imageApiKey: 'image_api_key', imageBaseUrl: 'image_base_url', imageModel: 'image_model',
-        videoApiKey: 'video_api_key', videoBaseUrl: 'video_base_url', videoModel: 'video_model',
+function getSettingsStorageMode() {
+    const local = getBrowserStorage('local');
+    try {
+        const savedMode = local ? local.getItem(settingsStorageModeKey) : '';
+        return allowedSettingsStorageModes.has(savedMode) ? savedMode : 'session';
+    } catch (e) {
+        console.warn('读取配置存储方式失败:', e);
+        return 'session';
+    }
+}
+
+function rememberSettingsStorageMode(mode) {
+    const local = getBrowserStorage('local');
+    if (!local) return;
+    try {
+        local.setItem(settingsStorageModeKey, mode);
+    } catch (e) {
+        console.warn('保存配置存储方式失败:', e);
+    }
+}
+
+function clearSavedSettings() {
+    for (const type of ['session', 'local']) {
+        const storage = getBrowserStorage(type);
+        try {
+            if (storage) storage.removeItem(settingsStorageKey);
+        } catch (e) {
+            console.warn(`清除 ${type}Storage 配置失败:`, e);
+        }
+    }
+}
+
+function setSettingsStorageHint(message = '') {
+    const hint = document.getElementById('settingsStorageHint');
+    if (!hint) return;
+    if (message) {
+        hint.textContent = message;
+        return;
+    }
+    const mode = document.getElementById('settingsStorageMode')?.value || 'session';
+    const messages = {
+        session: 'Key 仅保存在当前标签页的 sessionStorage；关闭标签页后自动清除（公网推荐）。',
+        local: 'Key 将明文保存在此浏览器的 localStorage。同源脚本可以读取，请勿在共享设备使用。',
+        none: 'Key 不会保存；刷新页面或关闭标签页后需要重新输入。',
     };
-    const data = {};
-    for (const [id, key] of Object.entries(mapping)) {
-        const element = document.getElementById(id);
-        data[key] = element ? element.value.trim() : '';
+    hint.textContent = messages[mode];
+}
+
+function setupSettingsStorage() {
+    const modeSelect = document.getElementById('settingsStorageMode');
+    const clearButton = document.getElementById('btnClearBrowserSettings');
+    const mode = getSettingsStorageMode();
+    modeSelect.value = mode;
+    setSettingsStorageHint();
+
+    modeSelect.addEventListener('change', () => {
+        const nextMode = allowedSettingsStorageModes.has(modeSelect.value)
+            ? modeSelect.value : 'session';
+        rememberSettingsStorageMode(nextMode);
+        if (nextMode === 'none') {
+            clearSavedSettings();
+        } else {
+            saveSettings(nextMode);
+        }
+        setSettingsStorageHint();
+    });
+
+    clearButton.addEventListener('click', () => {
+        clearSavedSettings();
+        for (const id of ['llmApiKey', 'imageApiKey', 'videoApiKey']) {
+            const element = document.getElementById(id);
+            if (element) element.value = '';
+        }
+        setSettingsStorageHint('已清除浏览器中保存的 AI 配置和当前页面内的 API Key。');
+    });
+}
+
+function loadSavedSettings() {
+    const mode = getSettingsStorageMode();
+    if (mode === 'none') return;
+    const storage = getBrowserStorage(mode);
+    if (!storage) {
+        setSettingsStorageHint('浏览器存储不可用，本次配置不会保存。');
+        return;
     }
     try {
-        await fetch('/api/settings', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(data),
-        });
+        const raw = storage.getItem(settingsStorageKey);
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            throw new Error('配置内容不是对象');
+        }
+        for (const id of savedSettingFields) {
+            const element = document.getElementById(id);
+            if (element && typeof data[id] === 'string') element.value = data[id];
+        }
     } catch (e) {
-        console.warn('保存本地配置失败:', e);
+        try { storage.removeItem(settingsStorageKey); } catch (_) { /* ignore */ }
+        console.warn('浏览器中的 AI 配置已损坏并被清除:', e);
+        setSettingsStorageHint('浏览器中的旧配置无法读取，已清除；请重新填写。');
+    }
+}
+
+function saveSettings(forcedMode = '') {
+    const mode = forcedMode || getSettingsStorageMode();
+    if (mode === 'none') {
+        clearSavedSettings();
+        return;
+    }
+    const storage = getBrowserStorage(mode);
+    if (!storage) {
+        setSettingsStorageHint('浏览器存储不可用，本次配置不会保存。');
+        return;
+    }
+    const data = {};
+    for (const id of savedSettingFields) {
+        const element = document.getElementById(id);
+        data[id] = element ? element.value.trim() : '';
+    }
+    try {
+        storage.setItem(settingsStorageKey, JSON.stringify(data));
+        const otherStorage = getBrowserStorage(mode === 'local' ? 'session' : 'local');
+        if (otherStorage) otherStorage.removeItem(settingsStorageKey);
+    } catch (e) {
+        console.warn('保存浏览器配置失败:', e);
+        setSettingsStorageHint('浏览器拒绝保存配置，本次仍可继续使用。');
     }
 }
 
@@ -607,7 +713,7 @@ async function runTestConnection() {
                 html += '<div class="test-hint">⏭️ 已跳过图像模型测试（未启用 AI 画面生成）</div>';
             } else {
                 const info = data.image.info;
-                html += `<div class="test-ok">✅ 图像模型 <b>${escapeHtml(data.image.model)}</b> 可用（返回类型: ${info.response_type}）</div>`;
+                html += `<div class="test-ok">✅ 图像模型 <b>${escapeHtml(data.image.model)}</b> 可用（返回类型: ${escapeHtml(info.response_type)}）</div>`;
             }
         } else if (data.image) {
             html += `<div class="test-err">❌ 图像模型 <b>${escapeHtml(data.image.model)}</b> 失败<br><span class="test-reply">${escapeHtml(data.image.error)}</span></div>`;
@@ -778,6 +884,9 @@ async function pollProgress() {
             const box = document.getElementById('decisionBox');
             box.style.display = 'block';
             const isTtsConfirmation = (data.decision_stage || '').includes('TTS');
+            const retryButton = document.getElementById('btnRetryAi');
+            retryButton.style.display = (!isTtsConfirmation && data.decision_can_retry)
+                ? 'inline-flex' : 'none';
             document.getElementById('decisionTitle').textContent = isTtsConfirmation
                 ? '请确认伴读文字' : `${data.decision_stage || 'AI 处理'}失败`;
             document.getElementById('decisionMsg').textContent = isTtsConfirmation
@@ -802,8 +911,8 @@ async function pollProgress() {
                             <div class="decision-scene-title">${scene.is_cover
                                 ? '片头封面（无旁白）'
                                 : scene.is_pdf_cover
-                                    ? `PDF 封面（第 ${scene.page_source} 页，无旁白）`
-                                : `场景 ${scene.scene_number || index + 1}（PDF 第 ${(scene.page_sources || [scene.page_source]).join(',')} 页）`}</div>
+                                    ? `PDF 封面（第 ${escapeHtml(scene.page_source)} 页，无旁白）`
+                                : `场景 ${escapeHtml(scene.scene_number || index + 1)}（PDF 第 ${escapeHtml((scene.page_sources || [scene.page_source]).join(','))} 页）`}</div>
                             <img class="decision-scene-image" src="/api/scene_image/${state.taskId}/${index}" alt="场景 ${index + 1}">
                             <textarea class="input decision-scene-prompt" data-scene-index="${index}" rows="4"
                                 ${(scene.is_cover || scene.is_pdf_cover) ? 'disabled aria-label="封面无旁白"' : ''}>${escapeHtml((scene.is_cover || scene.is_pdf_cover) ? '' : (scene.narration || ''))}</textarea>
@@ -912,10 +1021,10 @@ function updateGallery(taskId, scenes) {
             <p class="gallery-item-num">${scene.is_cover
                 ? '片头封面'
                 : scene.is_pdf_cover
-                    ? `PDF 封面 · 第 ${scene.page_source} 页`
-                : `场景 ${scene.scene_number || i + 1} · PDF 第 ${(scene.page_sources || [scene.page_source]).join(',')} 页`}</p>
-            <p class="gallery-item-mood">${scene.mood || ''}</p>
-            <p class="gallery-item-narration">${(scene.narration || '').substring(0, 80)}...</p>
+                    ? `PDF 封面 · 第 ${escapeHtml(scene.page_source)} 页`
+                : `场景 ${escapeHtml(scene.scene_number || i + 1)} · PDF 第 ${escapeHtml((scene.page_sources || [scene.page_source]).join(','))} 页`}</p>
+            <p class="gallery-item-mood">${escapeHtml(scene.mood || '')}</p>
+            <p class="gallery-item-narration">${escapeHtml((scene.narration || '').substring(0, 80))}...</p>
         `;
 
         item.appendChild(img);

@@ -21,7 +21,7 @@ from config import (
     VIDEO_ENGINES, DEFAULT_VIDEO_ENGINE,
     DEFAULT_NARRATION_VOICE, DEFAULT_DIALOGUE_VOICE,
     IMAGE_API_KEY, IMAGE_BASE_URL,
-    SETTINGS_FILE,
+    SETTINGS_FILE, ENABLE_SERVER_SETTINGS,
     NVIDIA_LLM_MODELS, NVIDIA_IMAGE_MODELS,
     AGNES_BASE_URL, AGNES_LLM_MODELS, AGNES_IMAGE_MODELS, AGNES_VIDEO_MODELS,
     AGNES_IMAGE_SIZES,
@@ -34,9 +34,41 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
+@app.after_request
+def add_security_headers(response):
+    """为公网部署提供基础浏览器安全边界。"""
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "media-src 'self' blob:; "
+        "connect-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'"
+    )
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+    if request.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.route('/api/settings', methods=['GET', 'POST'])
 def local_settings():
-    """读取或保存本机用户配置（仅供本地单用户部署）。"""
+    """兼容旧版本地设置文件；公网模式默认禁止服务器端持久化。"""
+    if not ENABLE_SERVER_SETTINGS:
+        if request.method == 'GET':
+            return jsonify({'enabled': False, 'storage': 'browser'})
+        return jsonify({
+            'error': '服务器端配置存储已禁用，请使用浏览器端存储模式',
+            'enabled': False,
+        }), 403
+
     fields = {
         'llm_api_key', 'llm_base_url', 'llm_model',
         'image_api_key', 'image_base_url', 'image_model',
@@ -47,16 +79,22 @@ def local_settings():
         try:
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as handle:
                 saved = json.load(handle)
-            return jsonify({key: str(saved.get(key, '')) for key in fields})
+            result = {key: str(saved.get(key, '')) for key in fields}
+            result['enabled'] = True
+            result['storage'] = 'server'
+            return jsonify(result)
         except (FileNotFoundError, json.JSONDecodeError):
-            return jsonify({key: '' for key in fields})
+            result = {key: '' for key in fields}
+            result['enabled'] = True
+            result['storage'] = 'server'
+            return jsonify(result)
     data = request.json or {}
     saved = {key: str(data.get(key, '') or '').strip() for key in fields}
     tmp = SETTINGS_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as handle:
         json.dump(saved, handle, ensure_ascii=False, indent=2)
     os.replace(tmp, SETTINGS_FILE)
-    return jsonify({'ok': True})
+    return jsonify({'ok': True, 'enabled': True, 'storage': 'server'})
 
 
 # ===== 全局错误处理器：始终返回 JSON，避免 Flask 默认 HTML 错误页破坏前端 JSON 解析 =====
@@ -114,7 +152,8 @@ def get_task(task_id):
         return _tasks.get(task_id, {}).copy()
 
 
-def wait_for_decision(task_id, stage, error, prompt='', timeout=3600):
+def wait_for_decision(task_id, stage, error, prompt='', timeout=3600,
+                      allow_retry=False, return_decision=False):
     """暂停后台任务等待用户决定；TTS 文本确认超时后自动继续。"""
     with _tasks_lock:
         task = _tasks[task_id]
@@ -123,6 +162,7 @@ def wait_for_decision(task_id, stage, error, prompt='', timeout=3600):
         confirmation = stage.startswith('TTS')
         task.update(status='waiting_user', decision=None, decision_stage=stage,
                     decision_prompt=prompt,
+                    decision_can_retry=bool(allow_retry),
                     error='' if confirmation else str(error),
                     message='请确认每个场景的伴读文字' if confirmation else f'{stage}失败，请选择继续或退出')
     signaled = event.wait(timeout)
@@ -141,7 +181,10 @@ def wait_for_decision(task_id, stage, error, prompt='', timeout=3600):
     if not signaled and not confirmation:
         raise RuntimeError(f'{stage}失败且等待用户决定超时: {error}')
     if decision != 'continue':
-        raise RuntimeError(f'用户已终止任务（{stage}失败: {error}）')
+        if decision != 'retry' or not allow_retry:
+            raise RuntimeError(f'用户已终止任务（{stage}失败: {error}）')
+    if return_decision:
+        return decision, decision_prompt
     return decision_prompt
 
 
@@ -489,19 +532,31 @@ def run_pipeline(task_id, pdf_path, config):
         update_task(task_id, phase='analyze', progress=28,
                     message='AI正在理解剧情和台词...' if use_ai_analysis else '正在按手动参数组织场景...')
         if use_ai_analysis:
-            try:
-                if story_ocr_results:
-                    story = analyze_story(story_ocr_results, art_style=art_style, api_key=api_key,
-                                          base_url=base_url, llm_model=llm_model or None,
-                                          progress_callback=lambda c, t, m: update_task(
-                                              task_id, progress=28 + int(c / (t or 1) * 7), message=m))
-                else:
-                    story = {'title': 'PDF 封面', 'scenes': []}
-            except Exception as error:
-                wait_for_decision(task_id, 'AI 理解', error)
-                story = {'title': 'AI 分析降级', 'scenes': _manual_scenes(
-                    story_ocr_results, config.get('pages_per_segment', 1),
-                    config.get('manual_duration', 5))}
+            while True:
+                try:
+                    if story_ocr_results:
+                        story = analyze_story(
+                            story_ocr_results, art_style=art_style, api_key=api_key,
+                            base_url=base_url, llm_model=llm_model or None,
+                            progress_callback=lambda c, t, m: update_task(
+                                task_id, progress=28 + int(c / (t or 1) * 7), message=m),
+                        )
+                    else:
+                        story = {'title': 'PDF 封面', 'scenes': []}
+                    break
+                except Exception as error:
+                    decision, _ = wait_for_decision(
+                        task_id, 'AI 理解', error,
+                        allow_retry=True, return_decision=True,
+                    )
+                    if decision == 'retry':
+                        update_task(task_id, status='running', phase='analyze', progress=28,
+                                    message='正在按模型额度限制等待并重试 AI 理解...')
+                        continue
+                    story = {'title': 'AI 分析降级', 'scenes': _manual_scenes(
+                        story_ocr_results, config.get('pages_per_segment', 1),
+                        config.get('manual_duration', 5))}
+                    break
         else:
             lines = config.get('manual_narration', '').splitlines()
             durations = [x.strip() for x in config.get('manual_durations', '').split(',') if x.strip()]
@@ -570,22 +625,37 @@ def run_pipeline(task_id, pdf_path, config):
             )
         if colorize_pages_enabled:
             color_dir = os.path.join(work_dir, 'color_pages')
-            colored_pages = colorize_pages(
-                page_images, color_dir, api_key=image_api_key,
-                base_url=image_base_url, image_model=image_model or None,
-                image_size_tier=image_size_tier,
-                progress_callback=lambda c, t, m, img: update_task(
-                    task_id, progress=38 + int(c / (t or 1) * 35),
-                    message=m, scenes=scenes)
-            )
-            page_images = colored_pages
+            while True:
+                try:
+                    colored_pages = colorize_pages(
+                        page_images, color_dir, api_key=image_api_key,
+                        base_url=image_base_url, image_model=image_model or None,
+                        image_size_tier=image_size_tier,
+                        progress_callback=lambda c, t, m, img: update_task(
+                            task_id, progress=38 + int(c / (t or 1) * 35),
+                            message=m, scenes=scenes),
+                    )
+                    page_images = colored_pages
+                    break
+                except Exception as error:
+                    decision, _ = wait_for_decision(
+                        task_id, 'AI 彩色美化', error,
+                        allow_retry=True, return_decision=True,
+                    )
+                    if decision == 'retry':
+                        update_task(task_id, status='running', phase='generate', progress=38,
+                                    message='正在按模型额度限制等待并重试彩色美化...')
+                        continue
+                    update_task(task_id, message='彩色美化已跳过，继续使用 PDF 原页面')
+                    break
         elif use_image_generation:
             scenes_dir = os.path.join(work_dir, 'scenes')
-            try:
+            while True:
+                try:
                     scenes = generate_all_scenes(
-                    scenes, scenes_dir, orientation=orientation,
-                    api_key=image_api_key, base_url=image_base_url,
-                    image_model=image_model or None,
+                        scenes, scenes_dir, orientation=orientation,
+                        api_key=image_api_key, base_url=image_base_url,
+                        image_model=image_model or None,
                         image_size_tier=image_size_tier,
                         progress_callback=lambda c, t, m, img: update_task(
                             task_id, progress=38 + int(c / (t or 1) * 35),
@@ -593,11 +663,20 @@ def run_pipeline(task_id, pdf_path, config):
                         content_filter_callback=lambda scene, prompt, error: wait_for_decision(
                             task_id, 'AI 生图提示词被过滤', error, prompt)
                     )
-            except Exception as error:
-                wait_for_decision(task_id, 'AI 生图', error)
-                for scene in scenes:
-                    scene['image_path'] = scene.get('image_path') or scene.get('source_image_path')
-                update_task(task_id, message='AI 生图已降级，未完成场景使用 PDF 原页面')
+                    break
+                except Exception as error:
+                    decision, _ = wait_for_decision(
+                        task_id, 'AI 生图', error,
+                        allow_retry=True, return_decision=True,
+                    )
+                    if decision == 'retry':
+                        update_task(task_id, status='running', phase='generate', progress=38,
+                                    message='正在按模型额度限制等待并重试未完成的 AI 画面...')
+                        continue
+                    for scene in scenes:
+                        scene['image_path'] = scene.get('image_path') or scene.get('source_image_path')
+                    update_task(task_id, message='AI 生图已降级，未完成场景使用 PDF 原页面')
+                    break
         else:
             source_numbers = [int(s.get('page_source') or 0) for s in scenes]
             repeated_single_source = (
@@ -1033,20 +1112,23 @@ def get_progress(task_id):
         'has_subtitles': bool(task.get('subtitle_path')),
         'decision_stage': task.get('decision_stage'),
         'decision_prompt': task.get('decision_prompt', ''),
+        'decision_can_retry': bool(task.get('decision_can_retry')),
     })
 
 
 @app.route('/api/decision/<task_id>', methods=['POST'])
 def task_decision(task_id):
     decision = (request.json or {}).get('decision')
-    if decision not in ('continue', 'abort'):
-        return jsonify({'error': 'decision 必须是 continue 或 abort'}), 400
+    if decision not in ('continue', 'retry', 'abort'):
+        return jsonify({'error': 'decision 必须是 continue、retry 或 abort'}), 400
     with _tasks_lock:
         task = _tasks.get(task_id)
         if not task:
             return jsonify({'error': '任务不存在'}), 404
         if task.get('status') != 'waiting_user':
             return jsonify({'error': '任务当前不需要用户决定'}), 409
+        if decision == 'retry' and not task.get('decision_can_retry'):
+            return jsonify({'error': '当前步骤不支持重试'}), 400
         task['decision'] = decision
         task['decision_prompt'] = (request.json or {}).get('prompt', '').strip()
         task['decision_event'].set()

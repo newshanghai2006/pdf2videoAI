@@ -8,7 +8,11 @@ import httpx
 
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL, ART_STYLES
 from .prompt_optimizer import optimize_chinese_visual_prompt
-from .rate_limiter import agnes_text_limiter, nvidia_limiter
+from .rate_limiter import (
+    agnes_text_limiter,
+    get_sensenova_llm_limiter,
+    nvidia_limiter,
+)
 
 
 def get_client(api_key=None, base_url=None):
@@ -26,11 +30,13 @@ def get_client(api_key=None, base_url=None):
     timeout = httpx.Timeout(connect=15.0, read=300.0, write=60.0, pool=15.0)
     is_nvidia = "nvidia" in url.lower() or key.startswith("nvapi-")
     is_agnes = "agnes-ai.com" in url.lower()
+    is_sensenova = any(host in url.lower() for host in ("sensenova", "sensecore"))
     # SDK 内置重试不会经过限速器；受控服务关闭内置重试，避免突破 RPM。
     client = OpenAI(api_key=key, base_url=url, timeout=timeout,
-                    max_retries=0 if (is_nvidia or is_agnes) else 1)
+                    max_retries=0 if (is_nvidia or is_agnes or is_sensenova) else 1)
     client._pdf2video_is_nvidia = is_nvidia
     client._pdf2video_is_agnes = is_agnes
+    client._pdf2video_is_sensenova = is_sensenova
     return client
 
 
@@ -83,6 +89,10 @@ def _chat(client, model, messages, temperature=0.7, json_mode=False,
             nvidia_limiter.wait()
         if getattr(client, "_pdf2video_is_agnes", False):
             agnes_text_limiter.wait()
+        sensenova_limiter = get_sensenova_llm_limiter(
+            model, getattr(client, "_pdf2video_is_sensenova", False))
+        if sensenova_limiter:
+            sensenova_limiter.wait()
         try:
             return _collect_stream(client.chat.completions.create(**kwargs))
         except APIStatusError as error:
@@ -92,6 +102,19 @@ def _chat(client, model, messages, temperature=0.7, json_mode=False,
                     and error.status_code in (429, 503)):
                 time.sleep(60 if error.status_code == 429 else 5)
                 agnes_text_limiter.wait()
+                return _collect_stream(client.chat.completions.create(**kwargs))
+            if sensenova_limiter and error.status_code in (429, 503):
+                retry_after = None
+                try:
+                    retry_after = float(error.response.headers.get("retry-after", ""))
+                except (AttributeError, TypeError, ValueError):
+                    pass
+                wait_seconds = retry_after if retry_after is not None else (
+                    sensenova_limiter.interval if error.status_code == 429 else 5
+                )
+                # 不在后台无提示地等待数小时；长窗口耗尽时交给“重试”按钮决定。
+                time.sleep(min(300, max(1, wait_seconds)))
+                sensenova_limiter.wait()
                 return _collect_stream(client.chat.completions.create(**kwargs))
             raise
 
@@ -218,7 +241,12 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
     """
     # 大文档一次返回全部场景容易超过输出 token 上限并产生残缺 JSON。
     # 分批分析后合并，既控制输入上下文，也控制每次结构化输出长度。
-    batch_size = 8
+    model_name = str(llm_model or LLM_MODEL).lower()
+    is_sensenova = (model_name.startswith("sensenova-")
+                    or any(host in str(base_url or "").lower()
+                           for host in ("sensenova", "sensecore")))
+    # SenseNova 轻量模型用更小批次，减少长 JSON 流被截断为 Unterminated string。
+    batch_size = 4 if is_sensenova else 8
     if len(ocr_results) > batch_size:
         batches = [ocr_results[i:i + batch_size]
                    for i in range(0, len(ocr_results), batch_size)]

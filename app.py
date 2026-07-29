@@ -447,8 +447,10 @@ def _ensure_ai_page_coverage(scenes, ocr_results):
             'narration': text,
             'dialogue': [],
             'image_prompt': (
-                f"A cinematic scene based on Chinese historical comic page {page}. "
-                "Preserve the people, setting and action described by the source page. "
+                f"A cinematic scene based on Chinese comic page {page}. "
+                "Preserve the exact period, country, character nationalities, clothing or "
+                "uniforms, equipment, setting and action described by the source page. "
+                "Never convert a modern event into an ancient costume scene. "
                 "No readable text, subtitles, logos or watermarks."
             ),
             'mood': 'calm',
@@ -944,10 +946,20 @@ def run_pipeline(task_id, pdf_path, config):
             if cover_mode == 'ai':
                 from core.image_generator import generate_scene_image
                 cover_image = os.path.join(work_dir, 'cover.png')
+                cover_context = " ".join(filter(None, [
+                    str(story.get('title') or '').strip(),
+                    str(story.get('summary') or '').strip(),
+                    *[str(item.get('image_prompt') or '').strip()
+                      for item in scenes[:3]],
+                ]))[:3000]
                 cover_prompt = (
-                    "A striking cinematic cover image for a Chinese historical comic video, "
+                    "A striking cinematic cover image for a Chinese comic video, "
                     "high visual impact, dramatic lighting, clear central characters, bold composition, "
-                    "rich traditional color, intriguing mystery, polished theatrical poster art, "
+                    "intriguing mystery, polished theatrical poster art. "
+                    "Preserve the source story's exact year or period, countries, locations, character "
+                    "nationalities, clothing or military uniforms, equipment and architecture. Never "
+                    "convert a modern or twentieth-century story into an ancient costume drama. "
+                    f"Source story context: {cover_context}. "
                     "clean poster composition with intentional empty space for a title to be added later. "
                     "Do not generate any readable text, letters, logos, captions or symbols. "
                     "No graphic violence, suitable for a general audience."

@@ -19,6 +19,31 @@ class StoryJSONError(RuntimeError):
     """LLM returned a scene response that cannot be decoded as complete JSON."""
 
 
+def _detect_document_period_context(ocr_results):
+    """Return a stable whole-document era hint for topics split across LLM batches."""
+    source_text = " ".join(str(item.get('text') or '') for item in ocr_results)
+    compact = "".join(source_text.split()).lower()
+    sino_vietnam_markers = (
+        "对越自卫反击战", "对越自卫还击战", "对越自卫反击作战",
+        "中越边境自卫反击", "中越边境战争", "中越边境作战",
+        "sino-vietnamese", "sino-vietnam", "china-vietnamborderwar",
+    )
+    is_sino_vietnam = (
+        any(marker in compact for marker in sino_vietnam_markers)
+        or ("解放军" in compact and "越军" in compact)
+        or ("1979" in compact and any(marker in compact for marker in ("越南", "中越", "对越")))
+    )
+    if is_sino_vietnam:
+        return (
+            "DOCUMENT-WIDE PERIOD CONTEXT: The entire source work depicts the 1979 "
+            "Sino-Vietnamese border war, a modern twentieth-century conflict. Show "
+            "period-accurate Chinese People's Liberation Army and Vietnamese personnel, "
+            "1970s uniforms, equipment, vehicles, border terrain and buildings. Never use "
+            "ancient robes, imperial armor, swords, spears, palaces or premodern warriors."
+        )
+    return ""
+
+
 def get_client(api_key=None, base_url=None):
     """获取 OpenAI 兼容客户端。
 
@@ -224,7 +249,8 @@ def _normalize_batch_page_sources(scenes, batch_pages, empty_pages=None):
 
 
 def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=None,
-                  llm_model=None, progress_callback=None, _direct_request=False):
+                  llm_model=None, progress_callback=None, _direct_request=False,
+                  _document_period_context=None):
     """用 LLM 分析 OCR 文字，拆分为场景并生成画面提示词。
 
     Args:
@@ -245,6 +271,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
     """
     # 大文档一次返回全部场景容易超过输出 token 上限并产生残缺 JSON。
     # 分批分析后合并，既控制输入上下文，也控制每次结构化输出长度。
+    if _document_period_context is None:
+        _document_period_context = _detect_document_period_context(ocr_results)
     model_name = str(llm_model or LLM_MODEL).lower()
     is_sensenova = (model_name.startswith("sensenova-")
                     or any(host in str(base_url or "").lower()
@@ -264,6 +292,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                     batch, art_style=art_style, api_key=api_key,
                     base_url=base_url, llm_model=llm_model,
                     _direct_request=True,
+                    _document_period_context=_document_period_context,
                 )
                 return [(batch, part)]
             except StoryJSONError as error:
@@ -343,7 +372,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 
     full_text = "\n\n".join(pages_text)
 
-    system_prompt = f"""你是一位专业的电影编剧和视觉导演。你正在分析一部中国历史连环画（漫画）的扫描OCR文字，需要将其转化为电影剧本和分镜方案。
+    system_prompt = f"""你是一位专业的电影编剧和视觉导演。你正在分析一部中国题材连环画（漫画）的扫描OCR文字，需要将其转化为电影剧本和分镜方案。作品可能发生在古代、近现代或当代，必须先根据原文识别准确年代，不得默认成古装题材。
 
 你的任务：
 1. 阅读并理解所有OCR识别的文字（可能有不准确之处，请根据上下文推断修正）
@@ -351,10 +380,13 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 3. 严格按输入 PDF 页拆分场景：每一页对应一个场景，不得漏页、合并页或把一页拆成多个场景
 4. 为每个场景编写旁白文字（用于配音）
 5. 为每个场景生成详细的英文画面提示词（用于AI图像生成）
-6. 识别故事的中国朝代、地域和人物身份；除非原文明确是外国人物，否则不得生成欧美人、
-   西方骑士、日本武士或其他不符合原作的族群、服装、盔甲和建筑
+6. 识别故事的准确年份或历史时期、国家、地域和人物身份，保持原作中中国人与外国人的真实国籍
+7. 现代或20世纪题材必须使用对应年代的军服、装备、车辆、建筑和发型，不得出现古装、盔甲、刀剑或宫殿
+8. 对越自卫反击战应明确为1979年前后的中越边境现代战争，准确区分中国人民解放军与越南人员
 
 艺术风格要求：{style_desc}
+
+全文统一年代背景：{_document_period_context or '未预先锁定；必须根据当前原文识别，禁止默认成古代。'}
 
 请严格按以下 JSON 格式返回（不要包含任何其他文字）：
 {{
@@ -367,7 +399,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
       "page_source": 1,
       "narration": "这一场景的旁白文字（中文，用于TTS配音，描述发生了什么）",
       "dialogue": ["角色名: 台词内容"],
-      "image_prompt": "A detailed English prompt for AI image generation. State the Chinese dynasty or historical period, Chinese character appearance, accurate clothing, hairstyle, architecture and props, then describe action, lighting and composition. Style: {style_desc}.",
+      "image_prompt": "A detailed English prompt for AI image generation. State the exact year or period, country, location and character nationality, with period-accurate clothing or uniforms, equipment, architecture and props, then describe action, lighting and composition. Style: {style_desc}.",
       "mood": "tense|calm|heroic|tragic|joyful|mysterious|epic",
       "duration": 5
     }}
@@ -377,9 +409,11 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 注意事项：
 - 场景数量必须与输入页数相同，每页严格一个场景；page_source 必须填写该页输入中显示的真实页码
 - image_prompt 必须是英文，描述要详细具体，包含人物外貌、动作、场景环境、光影效果
-- image_prompt 必须明确写出 Chinese people / Chinese historical setting，并尽量写明朝代；
-  未明确出现外国人物时，必须排除 Caucasian/European faces、Western medieval armor/castles、
-  Japanese samurai/kimono、Korean hanbok 和现代服装，不能只写含糊的 Asian
+- image_prompt 必须明确写出准确年份或时期、国家/地域及人物国籍，不能只写含糊的 Asian
+- 古代故事写明准确朝代及相应服饰建筑；近现代故事写明准确年份及相应军服、装备和建筑
+- 原文出现外国人物时必须保留其真实国籍，不得把越南人员写成中国人、欧美人或古代人物
+- 对越自卫反击战必须使用 1979 Sino-Vietnamese border war、Chinese People's Liberation Army、
+  period-accurate 1970s uniforms/equipment 等明确表述，并排除 ancient robes/armor/palaces
 - narration 是中文旁白，用于配音，应当流畅自然，像讲故事一样
 - 如果OCR文字不完整，请根据上下文和常识合理推断补充
 - title 不超过40个汉字，summary 不超过120个汉字，每个 image_prompt 不超过120个英文单词
@@ -426,6 +460,12 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
             "程序将自动缩小当前批次并重试。"
         ) from error
 
+    if _document_period_context:
+        for scene in result.get('scenes', []):
+            image_prompt = str(scene.get('image_prompt') or '').strip()
+            if "DOCUMENT-WIDE PERIOD CONTEXT:" not in image_prompt:
+                scene['image_prompt'] = f"{_document_period_context} {image_prompt}".strip()
+
     _normalize_batch_page_sources(
         result.get('scenes', []),
         [int(item['page_num']) for item in ocr_results],
@@ -456,7 +496,7 @@ def refine_scene_prompt(scene, art_style="cinematic", api_key=None, base_url=Non
     content = _chat(
         client, model,
         messages=[
-            {"role": "system", "content": f"You are an expert at writing image-generation prompts for Chinese historical stories. Enhance the prompt while preserving the correct Chinese dynasty, ethnicity, facial appearance, clothing, hairstyle, architecture and props. Do not westernize people or settings unless the source explicitly identifies a foreign character. Style: {style_desc}. Return only the prompt text."},
+            {"role": "system", "content": f"You are an expert at writing image-generation prompts for Chinese stories from any era. First preserve the exact year or period, country, location and each character's nationality. Use period-accurate clothing or uniforms, equipment, vehicles, hairstyles, architecture and props. Never turn a modern or twentieth-century event into an ancient costume scene. For the 1979 Sino-Vietnamese border war, accurately distinguish Chinese People's Liberation Army personnel from Vietnamese personnel and exclude ancient robes, armor, swords and palaces. Style: {style_desc}. Return only the prompt text."},
             {"role": "user", "content": scene.get('image_prompt', '')},
         ],
         temperature=0.8,

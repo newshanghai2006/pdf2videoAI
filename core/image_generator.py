@@ -149,8 +149,8 @@ def _agnes_generate(prompt, output_path, api_key, base_url, model,
     return output_path
 
 
-def _safe_historical_prompt(prompt):
-    """将可能触发过滤的战争描述改写为非血腥、适合全年龄的历史场景。"""
+def _safe_period_prompt(prompt):
+    """将战争描述改写为非血腥画面，同时保持原作年代与人物身份。"""
     replacements = {
         r"\b(blood|bloody|gore|gory)\b": "",
         r"\b(kill(?:ed|ing)?|murder(?:ed|ing)?)\b": "defeated",
@@ -158,7 +158,7 @@ def _safe_historical_prompt(prompt):
         r"\b(wound(?:ed|s|ing)?|injur(?:y|ed|ies))\b": "exhausted",
         r"\b(behead(?:ed|ing)?|decapitat(?:ed|ion|ing))\b": "captured",
         r"\b(stab(?:bed|bing)?|slash(?:ed|ing)?)\b": "confronting",
-        r"\b(weapon|sword|spear|arrow|gun)\b": "historical ceremonial equipment",
+        r"\b(weapon|sword|spear|arrow|gun)\b": "period-appropriate equipment",
     }
     safe = prompt
     for pattern, value in replacements.items():
@@ -166,9 +166,10 @@ def _safe_historical_prompt(prompt):
     safe = re.sub(r"\s+", " ", safe).strip()
     return (
         safe[:1800]
-        + " Family-friendly historical illustration, non-graphic, no blood, "
+        + " Family-friendly period-accurate illustration, non-graphic, no blood, "
           "no visible injury, no dead bodies, no explicit violence. Preserve the era, "
-          "characters, location, composition and dramatic storytelling atmosphere."
+          "countries, character nationalities, uniforms, location, composition and "
+          "dramatic storytelling atmosphere. Never replace a modern event with an ancient scene."
     )
 
 
@@ -478,7 +479,10 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
 
     for i, scene in enumerate(scenes):
         out_path = os.path.join(output_dir, f"scene_{i + 1:04d}.png")
-        prompt = scene.get('image_prompt', 'A beautiful Chinese historical scene')
+        prompt = scene.get(
+            'image_prompt',
+            'A beautiful Chinese story scene with the source period preserved exactly',
+        )
 
         # 用户点击“重试当前步骤”时保留已经成功生成的场景，只继续失败部分。
         existing = scene.get('image_path')
@@ -520,7 +524,7 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
                             continue
                     if not content_filter_rewritten:
                         content_filter_rewritten = True
-                        prompt = _safe_historical_prompt(prompt)
+                        prompt = _safe_period_prompt(prompt)
                         scene['image_prompt_safe'] = prompt
                         if progress_callback:
                             progress_callback(i, total,

@@ -15,6 +15,10 @@ from .rate_limiter import (
 )
 
 
+class StoryJSONError(RuntimeError):
+    """LLM returned a scene response that cannot be decoded as complete JSON."""
+
+
 def get_client(api_key=None, base_url=None):
     """获取 OpenAI 兼容客户端。
 
@@ -220,7 +224,7 @@ def _normalize_batch_page_sources(scenes, batch_pages, empty_pages=None):
 
 
 def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=None,
-                  llm_model=None, progress_callback=None):
+                  llm_model=None, progress_callback=None, _direct_request=False):
     """用 LLM 分析 OCR 文字，拆分为场景并生成画面提示词。
 
     Args:
@@ -247,31 +251,70 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                            for host in ("sensenova", "sensecore")))
     # SenseNova 轻量模型用更小批次，减少长 JSON 流被截断为 Unterminated string。
     batch_size = 4 if is_sensenova else 8
-    if len(ocr_results) > batch_size:
+    if not _direct_request:
         batches = [ocr_results[i:i + batch_size]
                    for i in range(0, len(ocr_results), batch_size)]
         merged = {'title': '', 'summary': '', 'characters': [], 'scenes': []}
         summaries = []
+
+        def analyze_batch(batch, batch_number, single_page_retry=True):
+            """Retry malformed structured output with progressively smaller batches."""
+            try:
+                part = analyze_story(
+                    batch, art_style=art_style, api_key=api_key,
+                    base_url=base_url, llm_model=llm_model,
+                    _direct_request=True,
+                )
+                return [(batch, part)]
+            except StoryJSONError as error:
+                if len(batch) == 1:
+                    if not single_page_retry:
+                        page_num = batch[0].get('page_num', '?')
+                        raise RuntimeError(
+                            f"PDF 第 {page_num} 页的 AI 场景 JSON 在自动重试后仍不完整。"
+                            "可点击“重试当前步骤”，或选择“无 AI 继续”保留已完成工作。"
+                        ) from error
+                    if progress_callback:
+                        progress_callback(
+                            batch_number - 1, len(batches),
+                            f"第 {batch_number} 批单页 JSON 不完整，正在自动重试",
+                        )
+                    return analyze_batch(batch, batch_number, single_page_retry=False)
+
+                midpoint = len(batch) // 2
+                if progress_callback:
+                    first_page = batch[0].get('page_num', '?')
+                    last_page = batch[-1].get('page_num', '?')
+                    progress_callback(
+                        batch_number - 1, len(batches),
+                        f"PDF 第 {first_page}-{last_page} 页返回不完整，"
+                        "正在缩小批次自动重试",
+                    )
+                return (
+                    analyze_batch(batch[:midpoint], batch_number)
+                    + analyze_batch(batch[midpoint:], batch_number)
+                )
+
         for batch_index, batch in enumerate(batches):
             if progress_callback:
                 progress_callback(batch_index, len(batches),
                                   f"AI 分批分析 {batch_index + 1}/{len(batches)}")
-            part = analyze_story(batch, art_style=art_style, api_key=api_key,
-                                 base_url=base_url, llm_model=llm_model)
-            _normalize_batch_page_sources(
-                part.get('scenes', []),
-                [int(item['page_num']) for item in batch],
-                empty_pages={int(item['page_num']) for item in batch
-                             if not str(item.get('text') or '').strip()},
-            )
-            if not merged['title']:
-                merged['title'] = part.get('title', '')
-            if part.get('summary'):
-                summaries.append(part['summary'])
-            for character in part.get('characters', []):
-                if character not in merged['characters']:
-                    merged['characters'].append(character)
-            merged['scenes'].extend(part.get('scenes', []))
+            recovered_parts = analyze_batch(batch, batch_index + 1)
+            for part_batch, part in recovered_parts:
+                _normalize_batch_page_sources(
+                    part.get('scenes', []),
+                    [int(item['page_num']) for item in part_batch],
+                    empty_pages={int(item['page_num']) for item in part_batch
+                                 if not str(item.get('text') or '').strip()},
+                )
+                if not merged['title']:
+                    merged['title'] = part.get('title', '')
+                if part.get('summary'):
+                    summaries.append(part['summary'])
+                for character in part.get('characters', []):
+                    if character not in merged['characters']:
+                        merged['characters'].append(character)
+                merged['scenes'].extend(part.get('scenes', []))
         for index, scene in enumerate(merged['scenes'], 1):
             scene['scene_number'] = index
         merged['summary'] = ' '.join(summaries)
@@ -339,6 +382,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
   Japanese samurai/kimono、Korean hanbok 和现代服装，不能只写含糊的 Asian
 - narration 是中文旁白，用于配音，应当流畅自然，像讲故事一样
 - 如果OCR文字不完整，请根据上下文和常识合理推断补充
+- title 不超过40个汉字，summary 不超过120个汉字，每个 image_prompt 不超过120个英文单词
+- 不要重复说明任务、JSON格式或输入原文，输出到最后一个场景后立即结束JSON
 - duration 根据场景复杂度建议3-8秒"""
 
     if progress_callback:
@@ -352,7 +397,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"以下是连环画的OCR识别文字：\n\n{full_text}"},
             ],
-            temperature=0.7, json_mode=True,
+            temperature=0.2, json_mode=True,
         )
     except Exception as e:
         if not _unsupported_parameter(e, "response_format"):
@@ -363,7 +408,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                 {"role": "system", "content": system_prompt + "\n\n重要：请只返回JSON，不要包含任何其他文字或markdown标记。"},
                 {"role": "user", "content": f"以下是连环画的OCR识别文字：\n\n{full_text}"},
             ],
-            temperature=0.7,
+            temperature=0.2,
         )
 
     if progress_callback:
@@ -376,9 +421,9 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
     try:
         result = json.loads(content)
     except json.JSONDecodeError as error:
-        raise RuntimeError(
+        raise StoryJSONError(
             f"LLM 返回的场景 JSON 不完整或格式错误（位置 {error.pos}: {error.msg}）。"
-            "请减少单次页面数量、改用输出能力更强的模型，或重试当前批次。"
+            "程序将自动缩小当前批次并重试。"
         ) from error
 
     _normalize_batch_page_sources(

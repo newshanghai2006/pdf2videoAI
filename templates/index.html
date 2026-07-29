@@ -4,14 +4,49 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI 影片生成系统</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260728-1') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260729-2') }}">
 </head>
 <body>
-    <div class="app">
+    <section class="auth-gate" id="authGate">
+        <form class="auth-panel" id="authForm">
+            <h1>AI Film Studio</h1>
+            <p>使用邮箱验证码登录</p>
+            <label for="authEmail">邮箱</label>
+            <input class="input" id="authEmail" type="email" autocomplete="email" required
+                   placeholder="name@example.com">
+            <label for="authCaptchaText">图形验证码</label>
+            <div class="auth-captcha-row">
+                <input class="input" id="authCaptchaText" type="text" autocomplete="off"
+                       maxlength="8" required placeholder="输入图中字符">
+                <img id="authCaptchaImage" alt="图形验证码" title="点击刷新图形验证码">
+                <button class="icon-button" id="btnRefreshCaptcha" type="button"
+                        title="刷新图形验证码" aria-label="刷新图形验证码">↻</button>
+            </div>
+            <input id="authCaptchaId" type="hidden">
+            <label for="authCode">邮箱验证码</label>
+            <div class="auth-code-row">
+                <input class="input" id="authCode" type="text" inputmode="numeric"
+                       autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required
+                       placeholder="6 位验证码">
+                <button class="btn btn-outline" id="btnSendCode" type="button">发送验证码</button>
+            </div>
+            <p class="auth-message" id="authMessage" aria-live="polite"></p>
+            <button class="btn btn-primary auth-submit" id="btnLogin" type="submit">登录</button>
+        </form>
+    </section>
+
+    <div class="app" id="mainApp" hidden>
         <!-- 顶栏 -->
         <header class="header">
-            <h1 class="logo">AI Film Studio</h1>
-            <p class="subtitle">PDF 连环画 → AI 理解 → AI 重塑画面 → 彩色影片</p>
+            <div class="header-brand">
+                <h1 class="logo">AI Film Studio</h1>
+                <p class="subtitle">PDF 连环画 → AI 理解 → AI 重塑画面 → 彩色影片</p>
+            </div>
+            <div class="user-tools">
+                <span class="user-email" id="currentUserEmail"></span>
+                <button class="btn btn-outline btn-compact" id="btnMyTasks" type="button">我的任务</button>
+                <button class="btn btn-outline btn-compact" id="btnLogout" type="button">退出</button>
+            </div>
         </header>
 
         <!-- 步骤导航 -->
@@ -298,6 +333,11 @@
             <section id="step3" class="step-panel">
                 <div class="progress-container">
                     <h2>正在生成影片...</h2>
+                    <div class="task-controls">
+                        <button class="btn btn-outline" id="btnPauseTask" type="button">暂停任务</button>
+                        <button class="btn btn-primary" id="btnResumeTask" type="button" style="display:none;">继续任务</button>
+                        <button class="btn btn-outline" id="btnProgressTasks" type="button">我的任务</button>
+                    </div>
                     <div class="progress-bar-wrapper">
                         <div class="progress-bar" id="progressBar">
                             <div class="progress-fill" id="progressFill" style="width:0%"></div>
@@ -406,6 +446,17 @@
         </footer>
     </div>
 
-    <script src="{{ url_for('static', filename='js/app.js', v='20260728-1') }}"></script>
+    <div class="modal-backdrop" id="tasksModal" hidden>
+        <section class="tasks-dialog" role="dialog" aria-modal="true" aria-labelledby="tasksTitle">
+            <div class="tasks-header">
+                <h2 id="tasksTitle">我的任务</h2>
+                <button class="icon-button" id="btnCloseTasks" type="button" aria-label="关闭">×</button>
+            </div>
+            <p class="tasks-hint">暂停后可关闭浏览器。重新登录同一邮箱即可继续。</p>
+            <div class="tasks-list" id="tasksList"></div>
+        </section>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js', v='20260729-2') }}"></script>
 </body>
 </html>

@@ -101,6 +101,56 @@ python app.py
 - **Windows**：`taskkill /F /IM python.exe`（会结束所有 python 进程，慎用）
 - **macOS / Linux**：`pkill -f app.py`
 
+### 邮箱验证码登录
+
+网页现在默认要求使用图形验证码、邮箱和 6 位邮箱验证码登录。图形验证码与邮箱验证码有效期
+默认都是 10 分钟，同一邮箱发送冷却 60 秒；登录会话默认有效 12 小时。发送邮件时图形验证码
+只校验、不消耗，完成登录时才消耗，因此发送邮件后继续填写同一张图即可。验证码刷新接口按
+IP 限流，答案和邮箱验证码都只以 SHA-256 哈希保存在 SQLite。会话 Cookie 使用 `HttpOnly`、
+`SameSite=Strict`，所有业务写请求还必须携带登录后取得的 CSRF Token。
+图形验证码渲染器直接移植 `Security_center/src/captcha.js` 的 5×7 点阵字库、交叉干扰线、
+噪点、交替倾斜和易混淆字符排除规则，输出 180×56 BMP，不依赖系统字体。
+
+本地首次调试可以保留 `.env` 中的：
+
+```text
+AUTH_PREVIEW_CODES=true
+```
+
+SMTP 未配置时，登录页会直接显示本地预览验证码。公网部署必须改为
+`AUTH_PREVIEW_CODES=false`，并配置真实邮件服务器：
+
+```text
+PUBLIC_BASE_URL=https://film.example.com
+PORT=5000
+TRUST_PROXY_HOPS=1
+SMTP_HOST=smtp.example.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_STARTTLS=true
+SMTP_USER=noreply@example.com
+SMTP_PASS=your-smtp-password
+SMTP_FROM=AI Film Studio <noreply@example.com>
+```
+
+若邮件服务器使用 587 端口，通常设置 `SMTP_SECURE=false`、`SMTP_STARTTLS=true`。公网的
+`PUBLIC_BASE_URL` 必须使用 `https://`，这样会话 Cookie 才会自动带上 `Secure` 属性。
+只有应用端口被防火墙限制为仅供可信反向代理访问时，才可把 `TRUST_PROXY_HOPS` 设为实际
+代理层数（单层 Nginx 通常为 1）；应用端口直接暴露公网时必须保持 0，防止伪造客户端 IP。
+
+关闭预览并启用真实邮箱发送的完整步骤：
+
+1. 在项目根目录创建或编辑 `.env`，设置 `AUTH_PREVIEW_CODES=false`。
+2. 填写 `SMTP_HOST`、`SMTP_PORT`、`SMTP_SECURE`、`SMTP_STARTTLS`、`SMTP_USER`、
+   `SMTP_PASS` 和 `SMTP_FROM`。
+3. 执行 `stop.bat` 后再执行 `run.bat`，环境变量只在服务启动时读取。
+4. 打开无痕窗口，用实际收件邮箱测试。正常响应不会再在网页或接口中返回预览验证码。
+
+邮箱服务商通常要求在 `SMTP_PASS` 中填写“SMTP 授权码/应用专用密码”，不是网页登录密码。
+不要把真实授权码提交到 Git，也不要发到聊天记录；只写入已被 `.gitignore` 排除的 `.env`。
+可以提供邮箱服务商名称、SMTP 主机、端口、SSL/STARTTLS 方式、发件地址和显示名称，由此确定
+配置格式；授权码应由你在本机自行填入。
+
 
 ---
 
@@ -323,6 +373,11 @@ OpenAI 常用的 `1024x1024`：程序在横屏影片中自动发送 `2752x1536`�
 但仍要求服务商同时实现 `images.edit`；只支持文生图时应使用“启用 AI 画面生成”。
 SenseNova U1 Fast 的文本分析、连接测试、生图和图片编辑共用同一个约 12.2 秒限速器。
 
+SenseNova 图片接口返回 `message: sensitive image`、`invalid_request_error`、`code: 18` 时，
+表示当前场景提示词触发内容过滤，不是模型名称、Key 或固定分辨率错误。程序会把它识别为
+“AI 生图提示词被过滤”，显示当前提示词供用户修改后重新提交。当前场景再次被过滤时会使用
+对应 PDF 原页面继续，已经成功生成的其他场景不会重做，也不会终止整个影片任务。
+
 LLM 接口与图像接口分别测试。LLM 测试成功只表示 `/chat/completions` 可用；
 完整影片生成还需要该服务支持 `/images/generations`，并提供可用的图像模型。
 
@@ -482,6 +537,18 @@ $env:AGNES_VIDEO_MODEL = "agnes-video-v2.0"
 兼容旧版客户端的 `/api/settings` 接口时，才可设置 `ENABLE_SERVER_SETTINGS=true`；该兼容
 接口会在服务器磁盘明文保存 Key，不适合共享服务。新版网页始终使用下述浏览器存储方式。
 
+邮箱认证与会话配置见 `.env.example`。公网至少应设置：
+
+```text
+AUTH_REQUIRED=true
+AUTH_PREVIEW_CODES=false
+PUBLIC_BASE_URL=https://film.example.com
+SESSION_TTL_HOURS=12
+EMAIL_CODE_TTL_MINUTES=10
+CAPTCHA_TTL_MINUTES=10
+AUTH_CODE_COOLDOWN_SECONDS=60
+```
+
 ---
 
 ## 项目结构
@@ -500,6 +567,9 @@ pdf2video/
 ├── core/                       # 核心处理模块
 │   ├── __init__.py
 │   ├── pdf_processor.py        # PDF → 页面图片（默认进程内 PyMuPDF，必要时降级到 pdf_helper.py）
+│   ├── auth_service.py         # 邮箱格式、验证码和 SMTP 邮件发送
+│   ├── captcha_service.py      # Security_center 同款点阵字形、干扰线图形验证码
+│   ├── persistence.py          # SQLite 用户、会话、验证码、任务和检查点持久化
 │   ├── ocr_processor.py        # OCR 文字识别（RapidOCR）
 │   ├── story_analyzer.py       # AI 剧情理解（OpenAI Chat Completions 兼容接口）
 │   ├── image_generator.py      # OpenAI/NVIDIA/Agnes 生图与 Agnes 图生图
@@ -524,7 +594,9 @@ pdf2video/
 │   ├── css/style.css           # 样式
 │   └── js/app.js               # 前端交互逻辑
 │
-├── uploads/                    # 上传的 PDF（运行时自动创建）
+├── data/                       # SQLite 数据库（运行时自动创建，不入 Git）
+│   └── app.db                  # 用户、会话、验证码哈希和任务元数据
+├── uploads/                    # 按用户 ID 隔离的上传文件（运行时自动创建）
 └── outputs/                    # 生成的影片和中间文件（运行时自动创建）
     └── <task_id>/
         ├── pages/              # 提取的 PDF 页面图片
@@ -568,6 +640,7 @@ stop.bat / stop.sh
 | `__pycache__/`、`*.pyc` | Python 字节码缓存 | 不入库；Python 自动生成 |
 | `uploads/` | 用户上传的 PDF 和 BGM | 不入库；应用启动时自动创建 |
 | `outputs/` | 页面图片、AI 场景图、音频和最终影片 | 不入库；任务运行时生成 |
+| `data/` | SQLite 登录、会话和任务数据库 | 不入库；应用启动时自动创建并持续备份 |
 | `test_pages/` | PDF/OCR 测试过程生成的页面 | 不入库 |
 | `server.log`、`*.log` | 服务运行日志 | 不入库 |
 | `.vscode/`、`.idea/` | 本机编辑器配置 | 默认不入库 |
@@ -650,16 +723,25 @@ OCR 不在配置页单独预览。开始生成后只执行一次 OCR，随后在
 `user_settings.json`，但新版网页仍使用浏览器存储。公网部署必须保持为 `false`；默认禁用时
 GET 只返回存储功能已禁用的状态，POST 返回 403，不会泄露旧文件中可能残留的 Key。
 
-公网正式运营还应在反向代理层配置有效 TLS、用户身份认证、请求和任务配额、上传大小限制，
-并按用户隔离上传文件、生成结果和任务下载权限；浏览器保存方式不能替代这些服务器安全措施。
+程序已经提供邮箱验证码身份认证，并按用户隔离上传、任务、图片、视频和字幕访问权限。公网
+正式运营仍应在反向代理层配置有效 TLS、可信代理头、请求和任务配额、上传大小限制、数据库
+备份及过期文件清理策略；浏览器保存方式不能替代这些服务器安全措施。
 
 ---
 
 ## API 接口
 
-任务状态保存在当前服务进程内存中。服务重启后，正在运行或已完成任务的内存状态会丢失；
-浏览器检测到任务 404 时会自动停止轮询，并提示返回配置页面重新生成。`outputs/` 中已生成的
-文件不会因重启而删除，但旧任务不能再通过原 task_id 下载。
+任务元数据和检查点保存在 `data/app.db`，页面、OCR、剧情、画面、TTS 和最终影片保存在
+`outputs/<task_id>/`。关闭浏览器不会停止后台任务；重新登录同一邮箱后，“我的任务”会显示
+运行中、暂停、失败和已完成的任务。服务进程重启时，原来处于等待或运行状态的任务会自动
+标记为“已暂停”，可从最近完成的检查点继续，不会从头重复已经落盘的页面、OCR、场景图和
+TTS 文件。
+
+“暂停任务”是协作式暂停：程序会先完成当前单页 OCR、单场景模型请求、单段 TTS 或当前
+FFmpeg 原子操作，再写入检查点并暂停，不会强杀正在写文件的进程。因此在耗时 API 或 FFmpeg
+调用中点击暂停后，状态可能短暂显示“正在暂停”。继续任务时，浏览器会重新提交当前页面中的
+LLM、图像和视频 Key；这些 Key 只在当前工作线程内使用，不会写入 `data/app.db` 的任务配置。
+若浏览器未保存 Key，应先回到配置页重新填写，再点击“继续”。
 
 影片合成阶段若 FFmpeg 失败，错误信息会提取时间戳、输入流、编码和封装相关的关键行，
 而不是只显示最后的编码统计；多段拼接会自动重新生成时间戳并统一为 CFR，降低音频拼接
@@ -690,6 +772,14 @@ OCR 伴读文字进入 TTS 前会直接去除换行符，不插入额外空格�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | Web 界面 |
+| GET | `/api/auth/session` | 获取当前登录状态和 CSRF Token |
+| GET | `/api/captcha` | 创建图形验证码挑战并返回 BMP Data URL |
+| POST | `/api/auth/send-code` | 发送邮箱验证码 |
+| POST | `/api/auth/verify` | 验证邮箱验证码并建立会话 |
+| POST | `/api/auth/logout` | 退出登录 |
+| GET | `/api/tasks` | 当前用户的任务列表 |
+| POST | `/api/tasks/<task_id>/pause` | 协作式暂停任务 |
+| POST | `/api/tasks/<task_id>/resume` | 携带当前浏览器 Key 从检查点继续 |
 | GET | `/api/config` | 获取可用配置（风格/语音/分辨率） |
 | POST | `/api/upload` | 上传 PDF 文件 |
 | POST | `/api/process` | 启动影片生成管线 |
@@ -703,15 +793,19 @@ OCR 伴读文字进入 TTS 前会直接去除换行符，不插入额外空格�
 
 ### 启动生成示例
 
-先上传拿到文件路径（`/api/upload` 返回的 `path` 字段），再用该路径启动生成：
+所有业务接口都要求登录，POST 还要求 `X-CSRF-Token`。日常使用应直接操作网页。脚本调用时，
+先通过 `/api/auth/verify` 保存会话 Cookie，并从响应 JSON 取得 `csrf_token`；之后上传和启动
+请求都同时带 Cookie 与该请求头。下面仅展示已登录后的请求结构：
 
 ```bash
 # 1) 上传 PDF，返回 { "path": "...uploads/xxxx_10辕门射戟.pdf", "page_count": ... }
 curl -X POST http://127.0.0.1:5000/api/upload \
+  -b cookies.txt -H "X-CSRF-Token: <csrf_token>" \
   -F "file=@10辕门射戟.pdf"
 
 # 2) 用上一步返回的 path 启动生成
 curl -X POST http://127.0.0.1:5000/api/process \
+  -b cookies.txt -H "X-CSRF-Token: <csrf_token>" \
   -H "Content-Type: application/json" \
   -d '{
     "pdf_path": "D:/.../pdf2video/uploads/xxxx_10辕门射戟.pdf",
@@ -728,7 +822,7 @@ curl -X POST http://127.0.0.1:5000/api/process \
 返回 `task_id` 后轮询进度：
 
 ```bash
-curl http://127.0.0.1:5000/api/progress/<task_id>
+curl -b cookies.txt http://127.0.0.1:5000/api/progress/<task_id>
 ```
 
 ---
@@ -737,7 +831,8 @@ curl http://127.0.0.1:5000/api/progress/<task_id>
 
 ### Q: 没有 OpenAI API Key 能用吗？
 
-不能完成完整管线。API Key 是必须的——AI 剧情分析和画面生成都依赖它。没有 Key 只能跑到 OCR 阶段。
+可以。关闭“AI 剧情分析”“AI 画面生成”和 AI 封面后，可使用 PDF 原页、OCR、手动分段、
+TTS 和本地 FFmpeg 完成影片。只有启用对应的文本、图像或视频 AI 功能时才需要该服务的 Key。
 
 ### Q: TTS 配音失败怎么办？
 

@@ -172,6 +172,28 @@ def _safe_historical_prompt(prompt):
     )
 
 
+def _is_content_filter_error(error):
+    """Normalize moderation errors returned by different image providers."""
+    detail = str(error or "")
+    lowered = detail.lower()
+    if any(marker in lowered for marker in (
+        "content_filtered",
+        "content filtered",
+        "sensitive image",
+        "image is sensitive",
+        "敏感图片",
+        "图片敏感",
+        "内容审核",
+    )):
+        return True
+    # SenseNova image moderation currently returns invalid_request_error/code 18.
+    return (
+        "invalid_request_error" in lowered
+        and re.search(r"['\"]?code['\"]?\s*:\s*['\"]?18(?:['\"]|\b)", detail,
+                      flags=re.IGNORECASE) is not None
+    )
+
+
 def _nvidia_generate(prompt, output_path, api_key, model, width=1024, height=1024):
     """NVIDIA NIM 图像生成，兼容 Flux 官方示例及 SDXL 返回格式。"""
     endpoint = f"https://ai.api.nvidia.com/v1/genai/{model}"
@@ -488,7 +510,7 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
                 scene['image_path'] = out_path
                 break
             except Exception as e:
-                if "CONTENT_FILTERED" in str(e).upper():
+                if _is_content_filter_error(e):
                     if content_filter_callback and not content_filter_rewritten:
                         revised = content_filter_callback(scene, prompt, str(e))
                         if revised:
@@ -508,13 +530,13 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
                     fallback = scene.get('source_image_path')
                     if fallback and os.path.exists(fallback):
                         scene['image_path'] = fallback
-                        scene['image_generation_warning'] = '安全提示词仍被 NVIDIA 过滤，已使用 PDF 原页面'
+                        scene['image_generation_warning'] = '安全提示词仍被图像服务过滤，已使用 PDF 原页面'
                         if progress_callback:
                             progress_callback(i + 1, total,
                                               f"场景 {i + 1} 被内容过滤，使用 PDF 原页面",
                                               fallback)
                         break
-                    raise RuntimeError(f"场景 {i + 1} 被 NVIDIA 内容过滤，且没有原页面可降级") from e
+                    raise RuntimeError(f"场景 {i + 1} 被图像服务内容过滤，且没有原页面可降级") from e
                 if attempt < max_retries - 1:
                     time.sleep(3)
                 else:

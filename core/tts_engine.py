@@ -208,6 +208,14 @@ def generate_scene_narrations(scenes, output_dir,
     for i, scene in enumerate(scenes):
         scene_out = os.path.join(output_dir, f"narration_{i + 1:04d}.mp3")
 
+        existing_audio = scene.get("audio_path")
+        if (existing_audio and os.path.exists(existing_audio)
+                and os.path.getsize(existing_audio) > 512):
+            success_count += 1
+            if progress_callback:
+                progress_callback(i + 1, total, f"复用已完成配音 {i + 1}/{total}")
+            continue
+
         if progress_callback:
             progress_callback(i, total, f"生成配音 {i + 1}/{total}")
 

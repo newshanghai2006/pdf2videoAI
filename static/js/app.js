@@ -16,10 +16,39 @@ let state = {
     pollTimer: null,
     lastSceneCount: 0,
     hasPrompts: false,
+    authenticated: false,
+    authEmail: '',
+    csrfToken: '',
+    appInitialized: false,
+    captchaId: '',
 };
+
+const nativeFetch = window.fetch.bind(window);
+
+async function apiFetch(url, options = {}) {
+    const requestOptions = {...options};
+    const headers = new Headers(requestOptions.headers || {});
+    if (state.csrfToken && String(requestOptions.method || 'GET').toUpperCase() !== 'GET') {
+        headers.set('X-CSRF-Token', state.csrfToken);
+    }
+    requestOptions.headers = headers;
+    const response = await nativeFetch(url, requestOptions);
+    if (response.status === 401 && !String(url).startsWith('/api/auth/')) {
+        showAuthGate('登录已过期，请重新获取验证码登录。', true);
+    }
+    return response;
+}
 
 // ===== 初始化 =====
 document.addEventListener('DOMContentLoaded', async () => {
+    setupAuthentication();
+    setupTaskControls();
+    await restoreSession();
+});
+
+async function initializeApplication() {
+    if (state.appInitialized) return;
+    state.appInitialized = true;
     await loadConfig();
     setupSettingsStorage();
     loadSavedSettings();
@@ -33,7 +62,324 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('btnRetryAi').addEventListener('click', () => submitDecision('retry'));
     document.getElementById('btnContinueWithoutAi').addEventListener('click', () => submitDecision('continue'));
     document.getElementById('btnAbortTask').addEventListener('click', () => submitDecision('abort'));
-});
+}
+
+function setupAuthentication() {
+    document.getElementById('btnSendCode').addEventListener('click', sendLoginCode);
+    document.getElementById('authForm').addEventListener('submit', verifyLoginCode);
+    document.getElementById('btnLogout').addEventListener('click', logout);
+    document.getElementById('btnRefreshCaptcha').addEventListener('click', refreshCaptcha);
+    document.getElementById('authCaptchaImage').addEventListener('click', refreshCaptcha);
+}
+
+async function restoreSession() {
+    try {
+        const response = await nativeFetch('/api/auth/session');
+        const data = await response.json();
+        if (!data.authenticated) {
+            showAuthGate();
+            await refreshCaptcha();
+            return;
+        }
+        await enterApplication(data);
+    } catch (error) {
+        showAuthGate(`无法读取登录状态: ${error.message}`, true);
+        await refreshCaptcha();
+    }
+}
+
+async function refreshCaptcha() {
+    const button = document.getElementById('btnRefreshCaptcha');
+    const output = document.getElementById('authMessage');
+    button.disabled = true;
+    try {
+        const response = await nativeFetch('/api/captcha');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '图形验证码加载失败');
+        state.captchaId = data.id;
+        document.getElementById('authCaptchaId').value = data.id;
+        document.getElementById('authCaptchaImage').src = data.image;
+        document.getElementById('authCaptchaText').value = '';
+    } catch (error) {
+        output.textContent = error.message;
+        output.classList.add('error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function showAuthGate(message = '', isError = false) {
+    state.authenticated = false;
+    state.csrfToken = '';
+    document.getElementById('mainApp').hidden = true;
+    document.getElementById('tasksModal').hidden = true;
+    document.getElementById('authGate').hidden = false;
+    const output = document.getElementById('authMessage');
+    output.textContent = message;
+    output.classList.toggle('error', isError);
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    state.pollTimer = null;
+}
+
+async function enterApplication(session) {
+    state.authenticated = true;
+    state.authEmail = session.email || '';
+    state.csrfToken = session.csrf_token || '';
+    document.getElementById('currentUserEmail').textContent = state.authEmail;
+    document.getElementById('authGate').hidden = true;
+    document.getElementById('mainApp').hidden = false;
+    await initializeApplication();
+    await restoreLatestTask();
+}
+
+async function sendLoginCode() {
+    const email = document.getElementById('authEmail').value.trim();
+    const button = document.getElementById('btnSendCode');
+    const output = document.getElementById('authMessage');
+    if (!email) return document.getElementById('authEmail').focus();
+    button.disabled = true;
+    output.classList.remove('error');
+    output.textContent = '正在发送验证码...';
+    try {
+        const response = await nativeFetch('/api/auth/send-code', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                email,
+                captcha_id: state.captchaId,
+                captcha_text: document.getElementById('authCaptchaText').value.trim(),
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '验证码发送失败');
+        if (data.preview_code) {
+            document.getElementById('authCode').value = data.preview_code;
+            output.textContent = `本地预览验证码: ${data.preview_code}。公网部署必须关闭预览模式。`;
+        } else {
+            output.textContent = data.message || '验证码已发送，请检查邮箱。';
+        }
+        let seconds = Number(data.cooldown_seconds || 60);
+        button.textContent = `${seconds} 秒后重发`;
+        const timer = setInterval(() => {
+            seconds -= 1;
+            button.textContent = seconds > 0 ? `${seconds} 秒后重发` : '发送验证码';
+            if (seconds <= 0) {
+                clearInterval(timer);
+                button.disabled = false;
+            }
+        }, 1000);
+    } catch (error) {
+        output.textContent = error.message;
+        output.classList.add('error');
+        button.disabled = false;
+        if (error.message.includes('图形验证码')) await refreshCaptcha();
+    }
+}
+
+async function verifyLoginCode(event) {
+    event.preventDefault();
+    const button = document.getElementById('btnLogin');
+    const output = document.getElementById('authMessage');
+    button.disabled = true;
+    try {
+        const response = await nativeFetch('/api/auth/verify', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                email: document.getElementById('authEmail').value.trim(),
+                code: document.getElementById('authCode').value.trim(),
+                captcha_id: state.captchaId,
+                captcha_text: document.getElementById('authCaptchaText').value.trim(),
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '登录失败');
+        output.textContent = '';
+        output.classList.remove('error');
+        await enterApplication(data);
+    } catch (error) {
+        output.textContent = error.message;
+        output.classList.add('error');
+        await refreshCaptcha();
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function logout() {
+    try {
+        await apiFetch('/api/auth/logout', {method: 'POST'});
+    } finally {
+        state.taskId = null;
+        state.authEmail = '';
+        showAuthGate('已退出登录。');
+        await refreshCaptcha();
+    }
+}
+
+function setupTaskControls() {
+    document.getElementById('btnMyTasks').addEventListener('click', openTasks);
+    document.getElementById('btnProgressTasks').addEventListener('click', openTasks);
+    document.getElementById('btnCloseTasks').addEventListener('click', closeTasks);
+    document.getElementById('tasksModal').addEventListener('click', event => {
+        if (event.target.id === 'tasksModal') closeTasks();
+    });
+    document.getElementById('tasksList').addEventListener('click', handleTaskAction);
+    document.getElementById('btnPauseTask').addEventListener('click', pauseCurrentTask);
+    document.getElementById('btnResumeTask').addEventListener('click', () => resumeTask(state.taskId));
+}
+
+async function fetchTasks() {
+    const response = await apiFetch('/api/tasks');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '读取任务失败');
+    return data.tasks || [];
+}
+
+async function restoreLatestTask() {
+    try {
+        const tasks = await fetchTasks();
+        const active = tasks.find(task => ['pending', 'running', 'pausing', 'waiting_user'].includes(task.status));
+        const paused = tasks.find(task => task.status === 'paused');
+        if (active || paused) attachTask(active || paused, false);
+    } catch (error) {
+        console.warn('恢复任务列表失败:', error);
+    }
+}
+
+async function openTasks() {
+    const modal = document.getElementById('tasksModal');
+    const list = document.getElementById('tasksList');
+    modal.hidden = false;
+    list.innerHTML = '<p class="tasks-empty">正在读取任务...</p>';
+    try {
+        renderTasks(await fetchTasks());
+    } catch (error) {
+        list.innerHTML = `<p class="tasks-empty">${escapeHtml(error.message)}</p>`;
+    }
+}
+
+function closeTasks() {
+    document.getElementById('tasksModal').hidden = true;
+}
+
+function renderTasks(tasks) {
+    const list = document.getElementById('tasksList');
+    if (!tasks.length) {
+        list.innerHTML = '<p class="tasks-empty">当前邮箱还没有任务。</p>';
+        return;
+    }
+    const statusNames = {
+        pending: '等待启动', running: '运行中', pausing: '正在暂停', paused: '已暂停',
+        waiting_user: '等待确认', completed: '已完成', error: '失败',
+    };
+    list.innerHTML = tasks.map(task => {
+        const id = escapeHtml(task.id);
+        const canOpen = ['pending', 'running', 'pausing', 'paused', 'waiting_user', 'error'].includes(task.status);
+        const updated = task.updated_at ? new Date(task.updated_at).toLocaleString() : '';
+        return `<article class="task-row">
+            <div>
+                <div class="task-name">${escapeHtml(task.pdf_name || 'PDF 任务')}</div>
+                <div class="task-meta">${escapeHtml(statusNames[task.status] || task.status || '')} · ${Number(task.progress || 0)}% · ${escapeHtml(updated)}</div>
+                <div class="task-meta">${escapeHtml(task.message || task.error || '')}</div>
+            </div>
+            <div class="task-actions">
+                ${canOpen ? `<button class="btn btn-outline" data-task-action="open" data-task-id="${id}">查看</button>` : ''}
+                ${task.status === 'paused' ? `<button class="btn btn-primary" data-task-action="resume" data-task-id="${id}">继续</button>` : ''}
+                ${task.status === 'completed' && task.has_video ? `<button class="btn btn-primary" data-task-action="result" data-task-id="${id}" data-has-prompts="${task.has_prompts ? '1' : '0'}">预览</button><a class="btn btn-outline" href="/api/download/${encodeURIComponent(task.id)}" download>下载</a>` : ''}
+                ${task.status === 'completed' && task.has_subtitles ? `<a class="btn btn-outline" href="/api/download_subtitles/${encodeURIComponent(task.id)}" download>SRT</a>` : ''}
+            </div>
+        </article>`;
+    }).join('');
+}
+
+async function handleTaskAction(event) {
+    const control = event.target.closest('[data-task-action]');
+    if (!control) return;
+    const taskId = control.dataset.taskId;
+    const action = control.dataset.taskAction;
+    if (action === 'resume') return resumeTask(taskId);
+    if (action === 'result') {
+        state.taskId = taskId;
+        state.hasPrompts = control.dataset.hasPrompts === '1';
+        closeTasks();
+        showResult(taskId);
+        return;
+    }
+    const tasks = await fetchTasks();
+    const task = tasks.find(item => item.id === taskId);
+    if (task) attachTask(task, true);
+}
+
+function attachTask(task, closeModal = true) {
+    state.taskId = task.id;
+    state.lastSceneCount = 0;
+    if (closeModal) closeTasks();
+    goToStep(3);
+    resetProgress();
+    document.getElementById('progressFill').style.width = `${Number(task.progress || 0)}%`;
+    document.getElementById('progressText').textContent = `${Number(task.progress || 0)}%`;
+    document.getElementById('progressMessage').textContent = task.message || '';
+    updateTaskButtons(task.status);
+    if (task.status === 'completed') showResult(task.id);
+    else if (task.status === 'paused') pollProgress();
+    else startPolling();
+}
+
+function currentCredentials() {
+    const value = id => document.getElementById(id)?.value.trim() || '';
+    return {
+        api_key: value('llmApiKey'),
+        llm_api_key: value('llmApiKey'),
+        image_api_key: value('imageApiKey'),
+        video_api_key: value('videoApiKey'),
+        seedance_api_key: value('videoApiKey'),
+    };
+}
+
+async function pauseCurrentTask() {
+    if (!state.taskId) return;
+    const button = document.getElementById('btnPauseTask');
+    button.disabled = true;
+    try {
+        const response = await apiFetch(`/api/tasks/${encodeURIComponent(state.taskId)}/pause`, {method: 'POST'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '暂停任务失败');
+        updateTaskButtons('pausing');
+        document.getElementById('progressMessage').textContent = '当前操作结束后将暂停...';
+        startPolling();
+    } catch (error) {
+        alert(error.message);
+        button.disabled = false;
+    }
+}
+
+async function resumeTask(taskId) {
+    if (!taskId) return;
+    try {
+        const response = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/resume`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(currentCredentials()),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '继续任务失败');
+        state.taskId = taskId;
+        closeTasks();
+        goToStep(3);
+        updateTaskButtons('running');
+        document.getElementById('progressMessage').textContent = '正在从最近检查点继续...';
+        startPolling();
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+function updateTaskButtons(status) {
+    const pause = document.getElementById('btnPauseTask');
+    const resume = document.getElementById('btnResumeTask');
+    const canPause = ['pending', 'running', 'waiting_user'].includes(status);
+    pause.style.display = ['completed', 'error', 'paused'].includes(status) ? 'none' : '';
+    pause.disabled = !canPause;
+    resume.style.display = status === 'paused' ? '' : 'none';
+}
 
 
 function setupCoverUpload() {
@@ -45,7 +391,7 @@ function setupCoverUpload() {
     input.addEventListener('change', async () => {
         if (!input.files.length) return;
         const form = new FormData(); form.append('file', input.files[0]);
-        const response = await fetch('/api/upload_cover', {method: 'POST', body: form});
+        const response = await apiFetch('/api/upload_cover', {method: 'POST', body: form});
         const data = await response.json();
         if (data.error) { alert(data.error); return; }
         state.coverPath = data.cover_path;
@@ -66,7 +412,7 @@ async function submitDecision(decision) {
         state.decisionCountdownInterval = null;
     }
     try {
-        const res = await fetch(`/api/decision/${state.taskId}`, {
+        const res = await apiFetch(`/api/decision/${state.taskId}`, {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({decision, prompt: collectDecisionPrompt()}),
         });
@@ -246,7 +592,7 @@ function saveSettings(forcedMode = '') {
 // ===== 加载配置选项 =====
 async function loadConfig() {
     try {
-        const res = await fetch('/api/config');
+        const res = await apiFetch('/api/config');
         const data = await res.json();
 
         // 艺术风格
@@ -492,7 +838,7 @@ async function handleFileUpload(file) {
     zone.innerHTML = '<div class="upload-icon" style="animation:spin 1s linear infinite">⏳</div><h2>上传中...</h2>';
 
     try {
-        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const res = await apiFetch('/api/upload', { method: 'POST', body: formData });
         const data = await res.json();
 
         if (data.error) {
@@ -631,7 +977,7 @@ function setupBgmUpload() {
         btn.disabled = true;
 
         try {
-            const res = await fetch('/api/upload_bgm', { method: 'POST', body: formData });
+            const res = await apiFetch('/api/upload_bgm', { method: 'POST', body: formData });
             const data = await res.json();
 
             if (data.error) {
@@ -691,7 +1037,7 @@ async function runTestConnection() {
     };
 
     try {
-        const res = await fetch('/api/test', {
+        const res = await apiFetch('/api/test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -817,7 +1163,7 @@ async function startProcessing() {
     goToStep(3);
 
     try {
-        const res = await fetch('/api/process', {
+        const res = await apiFetch('/api/process', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -848,14 +1194,14 @@ async function pollProgress() {
     if (!state.taskId) return;
 
     try {
-        const res = await fetch(`/api/progress/${state.taskId}`);
+        const res = await apiFetch(`/api/progress/${state.taskId}`);
         const data = await res.json();
 
         if (res.status === 404) {
             if (state.pollTimer) clearInterval(state.pollTimer);
             state.pollTimer = null;
             state.taskId = null;
-            showError('任务不存在或服务已重启。请返回配置页面重新开始生成。');
+            showError('任务不存在，或该任务不属于当前登录邮箱。');
             return;
         }
         if (!res.ok) {
@@ -869,6 +1215,7 @@ async function pollProgress() {
 
         // 更新阶段指示器
         updatePhases(data.phase, data.status);
+        updateTaskButtons(data.status);
 
         // 提示词就绪标记
         if (data.has_prompts) state.hasPrompts = true;
@@ -946,6 +1293,14 @@ async function pollProgress() {
                     document.getElementById('btnContinueWithoutAi').textContent = `确认文本并生成配音（${state.decisionSeconds}秒）`;
                 }, 1000);
             }
+        } else if (data.status === 'paused') {
+            clearInterval(state.pollTimer);
+            state.pollTimer = null;
+            document.getElementById('decisionBox').style.display = 'none';
+            document.querySelector('.progress-container > h2').textContent = '任务已暂停';
+            document.getElementById('progressMessage').textContent = data.message || '任务已暂停，可稍后继续。';
+        } else if (data.status === 'pausing') {
+            document.querySelector('.progress-container > h2').textContent = '正在暂停任务...';
         } else if (data.status === 'completed') {
             clearInterval(state.pollTimer);
             state.pollTimer = null;

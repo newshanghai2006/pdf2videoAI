@@ -35,12 +35,39 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+APP_DATABASE = os.environ.get("APP_DATABASE", os.path.join(DATA_DIR, "app.db"))
 SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
 # 公网部署默认禁止把网页中输入的 API Key 写入服务器文件。
 # 仅本地单用户需要兼容旧版客户端的 user_settings.json 接口时显式开启。
 ENABLE_SERVER_SETTINGS = os.environ.get(
     "ENABLE_SERVER_SETTINGS", "false"
 ).strip().lower() in ("1", "true", "yes", "on")
+
+# ===== 邮箱验证码认证 =====
+AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "true").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
+TRUST_PROXY_HOPS = max(0, int(os.environ.get("TRUST_PROXY_HOPS", "0")))
+SESSION_TTL_HOURS = max(1, int(os.environ.get("SESSION_TTL_HOURS", "12")))
+EMAIL_CODE_TTL_MINUTES = max(1, int(os.environ.get("EMAIL_CODE_TTL_MINUTES", "10")))
+CAPTCHA_TTL_MINUTES = max(1, int(os.environ.get("CAPTCHA_TTL_MINUTES", "10")))
+AUTH_PREVIEW_CODES = os.environ.get("AUTH_PREVIEW_CODES", "true").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+AUTH_CODE_COOLDOWN_SECONDS = max(10, int(os.environ.get("AUTH_CODE_COOLDOWN_SECONDS", "60")))
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_SECURE = os.environ.get("SMTP_SECURE", "true").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+SMTP_STARTTLS = os.environ.get("SMTP_STARTTLS", "true").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+SMTP_USER = os.environ.get("SMTP_USER", "").strip()
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "AI Film Studio <noreply@example.com>")
 
 # 视频分辨率
 RESOLUTIONS = {

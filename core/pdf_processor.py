@@ -73,9 +73,14 @@ def _inproc_render(pdf_path, out_dir, pages, dpi, progress_callback=None):
         mat = fitz.Matrix(zoom, zoom)
         total = len(pages)
         for idx, pno in enumerate(pages, 1):
+            output_path = os.path.join(out_dir, "page_%04d.png" % pno)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                if progress_callback:
+                    progress_callback(idx, total, "复用PDF页面 %s/%s" % (idx, total))
+                continue
             page = doc[pno - 1]
             pix = page.get_pixmap(matrix=mat)
-            pix.save(os.path.join(out_dir, "page_%04d.png" % pno))
+            pix.save(output_path)
             if progress_callback:
                 progress_callback(idx, total, "提取PDF页面 %s/%s" % (idx, total))
     finally:

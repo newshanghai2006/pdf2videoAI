@@ -123,6 +123,7 @@ IMAGE_MODELS = {
     "gpt-image-1": "GPT-Image-1（OpenAI 新版图像模型，推荐）",
     "dall-e-3": "DALL·E 3",
     "dall-e-2": "DALL·E 2",
+    "sensenova-u1-fast": "SenseNova U1 Fast（固定大尺寸自动适配）",
     "flux-1": "Flux（部分代理支持）",
     "stable-diffusion-3": "Stable Diffusion 3",
     "sd-xl": "Stable Diffusion XL",

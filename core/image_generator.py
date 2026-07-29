@@ -4,6 +4,7 @@
 兼容：
 - gpt-image-1 系列（返回 b64_json，尺寸 1024x1024 / 1536x1024 / 1024x1536）
 - dall-e-3 / dall-e-2（支持 quality / response_format，尺寸 1024x1024 / 1792x1024 / 1024x1792）
+- SenseNova U1 Fast（固定尺寸；横屏 2752x1536 / 竖屏 1536x2752）
 - 其它任意 OpenAI 兼容图像模型（自动去除不支持的参数）
 """
 import os
@@ -19,16 +20,41 @@ from PIL import Image
 
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, IMAGE_MODEL, IMAGE_QUALITY
 from .prompt_optimizer import optimize_chinese_visual_prompt
-from .rate_limiter import get_agnes_image_limiter, nvidia_limiter
+from .rate_limiter import (
+    get_agnes_image_limiter,
+    get_sensenova_llm_limiter,
+    nvidia_limiter,
+)
 
 
-def get_client(api_key=None, base_url=None):
+def _is_sensenova_provider(base_url):
+    return any(host in (base_url or "").lower() for host in ("sensenova", "sensecore"))
+
+
+def _is_sensenova_u1_image(model):
+    return (model or "").strip().lower().startswith("sensenova-u1-fast")
+
+
+def _wait_sensenova_request(model, base_url):
+    """文本与图像调用共享同一模型额度，避免批量生图突破账户限制。"""
+    limiter = get_sensenova_llm_limiter(
+        model, is_sensenova_provider=_is_sensenova_provider(base_url)
+    )
+    if limiter:
+        limiter.wait()
+
+
+def get_client(api_key=None, base_url=None, model=None):
     """获取 OpenAI 客户端"""
     key = (api_key or OPENAI_API_KEY or "").strip()
     url = (base_url or OPENAI_BASE_URL or "").strip().rstrip("/")
     if not key:
         raise ValueError("未配置 OpenAI API Key")
-    return OpenAI(api_key=key, base_url=url)
+    kwargs = {}
+    if _is_sensenova_provider(url) or _is_sensenova_u1_image(model):
+        # SDK 自动重试不会经过项目限速器，SenseNova 由外层统一控制。
+        kwargs["max_retries"] = 0
+    return OpenAI(api_key=key, base_url=url, **kwargs)
 
 
 def _download(url, output_path):
@@ -230,6 +256,12 @@ def _safe_remove_file(path):
 def _choose_sizes(model, orientation):
     """根据模型类型返回优先级排序的尺寸列表。"""
     model_l = (model or "").lower()
+    if _is_sensenova_u1_image(model_l):
+        # SenseNova U1 Fast 不接受 OpenAI 常用的 1024x1024。以下两项是其
+        # 固定尺寸列表中最接近影片 16:9 / 9:16 的规格。
+        if orientation == "portrait":
+            return ["1536x2752"]
+        return ["2752x1536"]
     if "gpt-image" in model_l:
         # gpt-image-1 支持 1024x1024 / 1536x1024 / 1024x1536
         if orientation == "portrait":
@@ -278,7 +310,7 @@ def generate_scene_image(prompt, output_path, orientation="landscape",
             nvidia_width, nvidia_height = 1024, 1024
         return _nvidia_generate(prompt, output_path, resolved_key, model,
                                  width=nvidia_width, height=nvidia_height)
-    client = get_client(resolved_key, resolved_url)
+    client = get_client(resolved_key, resolved_url, model=model)
     model_l = model.lower()
 
     sizes = _choose_sizes(model, orientation)
@@ -293,19 +325,23 @@ def generate_scene_image(prompt, output_path, orientation="landscape",
             if is_dalle:
                 kwargs["quality"] = quality_val
                 kwargs["response_format"] = "url"
+            _wait_sensenova_request(model, resolved_url)
             response = client.images.generate(**kwargs)
             return _save_response(response, output_path)
         except Exception as e:
             last_err = e
             continue
 
-    # 最终兜底：去掉所有可选参数，只给最小集合
-    try:
-        response = client.images.generate(
-            model=model, prompt=prompt, n=1, size="1024x1024")
-        return _save_response(response, output_path)
-    except Exception as e:
-        last_err = e
+    # 只有 DALL·E 请求附带了可选参数；部分兼容网关不接受这些参数，去掉后重试一次。
+    # 其它模型上面的请求已经是最小参数集合，不能再固定改成 1024x1024 重复消耗额度。
+    if is_dalle:
+        try:
+            _wait_sensenova_request(model, resolved_url)
+            response = client.images.generate(
+                model=model, prompt=prompt, n=1, size=sizes[-1])
+            return _save_response(response, output_path)
+        except Exception as e:
+            last_err = e
 
     raise RuntimeError(
         f"图像模型 '{model}' 调用失败: {last_err}。"
@@ -339,7 +375,7 @@ def test_image_model(api_key=None, base_url=None, image_model=None,
                     "size": str(image_size_tier).upper(), "supported": True}
         finally:
             _safe_remove_file(test_path)
-    client = get_client(resolved_key, resolved_url)
+    client = get_client(resolved_key, resolved_url, model=model)
     if _is_nvidia(resolved_url, resolved_key):
         import tempfile
         test_path = os.path.join(tempfile.gettempdir(), "nvidia_image_test.png")
@@ -362,6 +398,10 @@ def test_image_model(api_key=None, base_url=None, image_model=None,
             {"size": "1024x1024", "quality": "standard", "response_format": "url"},
             {"size": "1024x1024"},
         ]
+    elif _is_sensenova_u1_image(model):
+        attempts = [
+            {"size": _choose_sizes(model, "landscape")[0]},
+        ]
     elif "gpt-image" in model_l:
         attempts = [
             {"size": "1024x1024"},
@@ -374,6 +414,7 @@ def test_image_model(api_key=None, base_url=None, image_model=None,
     last_err = None
     for combo in attempts:
         try:
+            _wait_sensenova_request(model, resolved_url)
             response = client.images.generate(model=model, prompt=test_prompt, n=1, **combo)
             data = response.data[0]
             if getattr(data, 'b64_json', None):
@@ -507,11 +548,15 @@ def colorize_page(image_path, output_path, api_key=None, base_url=None,
             orientation=orientation, size_tier=image_size_tier,
             input_paths=[image_path],
         )
-    client = get_client(resolved_key, resolved_url)
+    with Image.open(image_path) as source_image:
+        orientation = "portrait" if source_image.height > source_image.width else "landscape"
+    client = get_client(resolved_key, resolved_url, model=model)
     with open(image_path, "rb") as source:
         try:
+            _wait_sensenova_request(model, resolved_url)
             response = client.images.edit(
-                model=model, image=source, prompt=prompt, n=1, size="1024x1024"
+                model=model, image=source, prompt=prompt, n=1,
+                size=_choose_sizes(model, orientation)[0],
             )
         except Exception as error:
             raise RuntimeError(

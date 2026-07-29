@@ -10,6 +10,7 @@
 import os
 import time
 import base64
+import http.client
 import urllib.request
 import urllib.error
 import json
@@ -25,6 +26,59 @@ from .rate_limiter import (
     get_sensenova_llm_limiter,
     nvidia_limiter,
 )
+
+
+class ImageTransportError(RuntimeError):
+    """Image response or download ended before the complete payload arrived."""
+
+
+def _exception_chain(error):
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+
+
+def _is_transient_image_error(error):
+    """Recognize provider/proxy failures that are safe to retry with the same prompt."""
+    transient_types = (
+        ImageTransportError,
+        http.client.IncompleteRead,
+        http.client.RemoteDisconnected,
+        TimeoutError,
+        ConnectionError,
+        urllib.error.URLError,
+    )
+    markers = (
+        "incompleteread",
+        "incomplete read",
+        "peer closed connection",
+        "remoteprotocolerror",
+        "remotedisconnected",
+        "connection reset",
+        "connection aborted",
+        "connection error",
+        "server disconnected",
+        "unexpected eof",
+        "timed out",
+        "read timeout",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway",
+    )
+    for item in _exception_chain(error):
+        if isinstance(item, urllib.error.HTTPError):
+            if item.code in (408, 429) or 500 <= item.code <= 599:
+                return True
+            continue
+        if isinstance(item, transient_types):
+            return True
+        detail = f"{type(item).__name__}: {item}".lower()
+        if any(marker in detail for marker in markers):
+            return True
+    return False
 
 
 def _is_sensenova_provider(base_url):
@@ -57,12 +111,38 @@ def get_client(api_key=None, base_url=None, model=None):
     return OpenAI(api_key=key, base_url=url, **kwargs)
 
 
-def _download(url, output_path):
+def _download(url, output_path, max_attempts=4):
+    """Download an image atomically and retry an interrupted response without regenerating it."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        with open(output_path, 'wb') as f:
-            f.write(resp.read())
+    partial_path = output_path + ".download"
+    for attempt in range(max_attempts):
+        try:
+            received = 0
+            expected = None
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                try:
+                    expected = int(resp.headers.get("Content-Length", ""))
+                except (TypeError, ValueError):
+                    expected = None
+                with open(partial_path, 'wb') as handle:
+                    while True:
+                        chunk = resp.read(256 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        received += len(chunk)
+            if expected is not None and received < expected:
+                raise ImageTransportError(
+                    f"图片下载提前结束（已接收 {received} 字节，应接收 {expected} 字节）"
+                )
+            os.replace(partial_path, output_path)
+            return
+        except Exception as error:
+            _safe_remove_file(partial_path)
+            if not _is_transient_image_error(error) or attempt >= max_attempts - 1:
+                raise
+            time.sleep(min(20, 3 * (2 ** attempt)))
 
 
 def _is_nvidia(base_url, api_key):
@@ -222,8 +302,10 @@ def _nvidia_generate(prompt, output_path, api_key, model, width=1024, height=102
         raw = output_path + ".raw"
         with open(raw, "wb") as handle:
             handle.write(base64.b64decode(encoded))
-        _flatten_to_rgb(raw, output_path)
-        _safe_remove_file(raw)
+        try:
+            _flatten_to_rgb(raw, output_path)
+        finally:
+            _safe_remove_file(raw)
         return output_path
     except urllib.error.HTTPError as error:
         try:
@@ -243,10 +325,16 @@ def _flatten_to_rgb(src_path, dst_path):
     AI 生成的图像（gpt-image-1 / DALL·E）常带透明背景，
     直接喂给 ffmpeg 的 libx264 会导致 get_buffer() 失败。
     """
-    img = Image.open(src_path).convert("RGBA")
-    bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-    img = Image.alpha_composite(bg, img).convert("RGB")
-    img.save(dst_path)
+    partial_path = dst_path + ".part"
+    try:
+        with Image.open(src_path) as source:
+            image = source.convert("RGBA")
+        background = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        image = Image.alpha_composite(background, image).convert("RGB")
+        image.save(partial_path, format="PNG")
+        os.replace(partial_path, dst_path)
+    finally:
+        _safe_remove_file(partial_path)
 
 
 def _save_response(response, output_path):
@@ -264,8 +352,10 @@ def _save_response(response, output_path):
         _download(data.url, tmp_path)
     else:
         raise RuntimeError("图像响应中既没有 url 也没有 b64_json")
-    _flatten_to_rgb(tmp_path, output_path)
-    _safe_remove_file(tmp_path)
+    try:
+        _flatten_to_rgb(tmp_path, output_path)
+    finally:
+        _safe_remove_file(tmp_path)
     return output_path
 
 
@@ -353,11 +443,13 @@ def generate_scene_image(prompt, output_path, orientation="landscape",
             return _save_response(response, output_path)
         except Exception as e:
             last_err = e
+            if _is_transient_image_error(e):
+                break
             continue
 
     # 只有 DALL·E 请求附带了可选参数；部分兼容网关不接受这些参数，去掉后重试一次。
     # 其它模型上面的请求已经是最小参数集合，不能再固定改成 1024x1024 重复消耗额度。
-    if is_dalle:
+    if is_dalle and not _is_transient_image_error(last_err):
         try:
             _wait_sensenova_request(model, resolved_url)
             response = client.images.generate(
@@ -365,6 +457,12 @@ def generate_scene_image(prompt, output_path, orientation="landscape",
             return _save_response(response, output_path)
         except Exception as e:
             last_err = e
+
+    if _is_transient_image_error(last_err):
+        raise ImageTransportError(
+            f"图像模型 '{model}' 已开始返回数据，但响应在传输完成前中断: {last_err}。"
+            "这通常是服务端或中间代理断开连接，不表示模型名称不支持。"
+        ) from last_err
 
     raise RuntimeError(
         f"图像模型 '{model}' 调用失败: {last_err}。"
@@ -501,8 +599,8 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
         if progress_callback:
             progress_callback(i, total, f"AI生成画面 {i + 1}/{total}", None)
 
-        # 重试机制
-        max_retries = 3
+        # 普通调用错误最多尝试 3 次；大图片传输中断使用更长的递增退避，最多 5 次。
+        max_retries = 5
         content_filter_rewritten = False
         for attempt in range(max_retries):
             try:
@@ -541,10 +639,27 @@ def generate_all_scenes(scenes, output_dir, orientation="landscape",
                                               fallback)
                         break
                     raise RuntimeError(f"场景 {i + 1} 被图像服务内容过滤，且没有原页面可降级") from e
-                if attempt < max_retries - 1:
-                    time.sleep(3)
-                else:
-                    raise RuntimeError(f"场景 {i + 1} 画面生成失败: {e}")
+                is_transport_error = _is_transient_image_error(e)
+                retry_limit = max_retries if is_transport_error else 3
+                if attempt < retry_limit - 1:
+                    wait_seconds = min(30, 5 * (2 ** attempt)) if is_transport_error else 3
+                    if progress_callback:
+                        message = (
+                            f"场景 {i + 1} 图片传输中断，{wait_seconds} 秒后自动重试 "
+                            f"{attempt + 2}/{retry_limit}"
+                            if is_transport_error else
+                            f"场景 {i + 1} 调用失败，正在自动重试 {attempt + 2}/{retry_limit}"
+                        )
+                        progress_callback(i, total, message, None)
+                    time.sleep(wait_seconds)
+                    continue
+                if is_transport_error:
+                    raise RuntimeError(
+                        f"场景 {i + 1} 图片响应连续传输中断，已自动尝试 {retry_limit} 次: {e}。"
+                        "这通常是图像服务或代理提前关闭大响应；可重试当前步骤，"
+                        "已成功生成的场景不会重复生成。"
+                    ) from e
+                raise RuntimeError(f"场景 {i + 1} 画面生成失败: {e}") from e
 
         if progress_callback and not scene.get('image_generation_warning'):
             progress_callback(i + 1, total, f"画面生成完成 {i + 1}/{total}",

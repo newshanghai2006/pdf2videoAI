@@ -607,6 +607,7 @@ pdf2video/
 │   └── index.html              # Web 界面
 │
 ├── static/
+│   ├── favicon.svg             # 浏览器标签页图标（绿色圆底、白色 V）
 │   ├── css/style.css           # 样式
 │   └── js/app.js               # 前端交互逻辑
 │

@@ -452,9 +452,12 @@
         <section class="tasks-dialog" role="dialog" aria-modal="true" aria-labelledby="tasksTitle">
             <div class="tasks-header">
                 <h2 id="tasksTitle">我的任务</h2>
-                <button class="icon-button" id="btnCloseTasks" type="button" aria-label="关闭">×</button>
+                <div class="tasks-header-actions">
+                    <button class="btn btn-primary btn-compact" id="btnNewTask" type="button">新任务</button>
+                    <button class="icon-button" id="btnCloseTasks" type="button" aria-label="关闭">×</button>
+                </div>
             </div>
-            <p class="tasks-hint">暂停后可关闭浏览器。重新登录同一邮箱即可继续。</p>
+            <p class="tasks-hint">暂停后可关闭浏览器。已完成、失败或已暂停的任务可删除。</p>
             <div class="tasks-list" id="tasksList"></div>
         </section>
     </div>

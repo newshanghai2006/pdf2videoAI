@@ -219,6 +219,7 @@ function setupTaskControls() {
     document.getElementById('btnMyTasks').addEventListener('click', openTasks);
     document.getElementById('btnProgressTasks').addEventListener('click', openTasks);
     document.getElementById('btnCloseTasks').addEventListener('click', closeTasks);
+    document.getElementById('btnNewTask').addEventListener('click', startNewTask);
     document.getElementById('tasksModal').addEventListener('click', event => {
         if (event.target.id === 'tasksModal') closeTasks();
     });
@@ -286,6 +287,7 @@ function renderTasks(tasks) {
                 ${task.status === 'paused' ? `<button class="btn btn-primary" data-task-action="resume" data-task-id="${id}">继续</button>` : ''}
                 ${task.status === 'completed' && task.has_video ? `<button class="btn btn-primary" data-task-action="result" data-task-id="${id}" data-has-prompts="${task.has_prompts ? '1' : '0'}">预览</button><a class="btn btn-outline" href="/api/download/${encodeURIComponent(task.id)}" download>下载</a>` : ''}
                 ${task.status === 'completed' && task.has_subtitles ? `<a class="btn btn-outline" href="/api/download_subtitles/${encodeURIComponent(task.id)}" download>SRT</a>` : ''}
+                ${['completed', 'error', 'paused'].includes(task.status) ? `<button class="task-delete" data-task-action="delete" data-task-id="${id}" type="button" title="删除任务" aria-label="删除任务">🗑</button>` : ''}
             </div>
         </article>`;
     }).join('');
@@ -296,6 +298,7 @@ async function handleTaskAction(event) {
     if (!control) return;
     const taskId = control.dataset.taskId;
     const action = control.dataset.taskAction;
+    if (action === 'delete') return deleteTask(taskId, control);
     if (action === 'resume') return resumeTask(taskId);
     if (action === 'result') {
         state.taskId = taskId;
@@ -307,6 +310,54 @@ async function handleTaskAction(event) {
     const tasks = await fetchTasks();
     const task = tasks.find(item => item.id === taskId);
     if (task) attachTask(task, true);
+}
+
+async function deleteTask(taskId, control) {
+    if (!taskId || !window.confirm('删除此任务及其生成的影片、图片、音频和字幕？此操作不能恢复。')) {
+        return;
+    }
+    control.disabled = true;
+    try {
+        const response = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`, {method: 'DELETE'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '删除任务失败');
+        if (data.cleanup_warning) console.warn(data.cleanup_warning);
+        if (state.taskId === taskId) {
+            startNewTask();
+            return;
+        }
+        renderTasks(await fetchTasks());
+    } catch (error) {
+        alert(error.message);
+        control.disabled = false;
+    }
+}
+
+function startNewTask() {
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    state.pollTimer = null;
+    state.taskId = null;
+    state.pdfPath = '';
+    state.pdfName = '';
+    state.pageCount = 0;
+    state.bgmPath = '';
+    state.coverPath = '';
+    document.getElementById('fileInput').value = '';
+    document.getElementById('uploadInfo').style.display = 'none';
+    const zone = document.getElementById('uploadZone');
+    zone.innerHTML = '<div class="upload-icon">📄</div><h2>拖拽 PDF 到此处</h2><p>或点击选择文件</p>';
+    zone.style.display = 'block';
+    document.getElementById('btnStep1Next').disabled = true;
+    document.getElementById('bgmInput').value = '';
+    document.getElementById('bgmName').textContent = '未选择';
+    document.getElementById('coverInput').value = '';
+    document.getElementById('coverName').textContent = '';
+    document.getElementById('coverMode').value = 'none';
+    document.getElementById('coverUploadGroup').style.display = 'none';
+    resetProgress();
+    closeTasks();
+    goToStep(1);
+    window.scrollTo({top: 0, behavior: 'smooth'});
 }
 
 function attachTask(task, closeModal = true) {

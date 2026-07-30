@@ -7,6 +7,7 @@ import os
 import uuid
 import json
 import secrets
+import shutil
 import threading
 import time
 import traceback
@@ -141,6 +142,33 @@ def _is_owned_upload(path):
         return os.path.commonpath([root, candidate]) == root
     except ValueError:
         return False
+
+
+def _task_output_dir(task_id):
+    """Return a task-specific output directory only when it remains under OUTPUT_DIR."""
+    root = os.path.realpath(OUTPUT_DIR)
+    candidate = os.path.realpath(os.path.join(root, str(task_id)))
+    try:
+        if os.path.commonpath([root, candidate]) != root or candidate == root:
+            raise ValueError("无效的任务输出目录")
+    except ValueError as error:
+        raise ValueError("无效的任务输出目录") from error
+    return candidate
+
+
+def _delete_task_artifacts(task):
+    """Remove files private to a deleted task without touching another user's data."""
+    output_dir = _task_output_dir(task['id'])
+    if os.path.isdir(output_dir):
+        shutil.rmtree(output_dir)
+
+    pdf_path = task.get('pdf_path')
+    if (pdf_path and _is_owned_upload(pdf_path)
+            and not store.has_pdf_reference(g.current_user['id'], pdf_path)):
+        try:
+            os.remove(pdf_path)
+        except FileNotFoundError:
+            pass
 
 
 @app.after_request
@@ -1338,6 +1366,34 @@ def resume_task(task_id):
             }):
         return jsonify({'error': '任务线程仍在运行，请稍后重试'}), 409
     return jsonify({'ok': True, 'task_id': task_id})
+
+
+@app.route('/api/tasks/<task_id>', methods=['DELETE'])
+@login_required
+@csrf_required
+def delete_task(task_id):
+    task = _owned_task(task_id)
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    if task.get('status') not in ('completed', 'error', 'paused'):
+        return jsonify({'error': '请先暂停或等待任务结束后再删除'}), 409
+
+    with _tasks_lock:
+        if task_id in _running_threads:
+            return jsonify({'error': '任务仍在停止中，请稍后再删除'}), 409
+
+    deleted = store.delete_task(g.current_user['id'], task_id)
+    if not deleted:
+        return jsonify({'error': '任务不存在'}), 404
+    with _tasks_lock:
+        _tasks.pop(task_id, None)
+
+    warning = ''
+    try:
+        _delete_task_artifacts(deleted)
+    except OSError as error:
+        warning = f'任务记录已删除，但部分本地文件暂未清理: {error}'
+    return jsonify({'ok': True, 'cleanup_warning': warning})
 
 @app.route('/')
 def index():

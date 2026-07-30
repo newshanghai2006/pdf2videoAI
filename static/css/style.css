@@ -909,6 +909,12 @@ input[type="number"] {
     font-size: 20px;
 }
 
+.tasks-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .icon-button {
     width: 36px;
     height: 36px;
@@ -967,6 +973,27 @@ input[type="number"] {
 .task-actions .btn {
     min-height: 34px;
     padding: 6px 10px;
+}
+
+.task-delete {
+    width: 34px;
+    height: 34px;
+    border: 1px solid color-mix(in srgb, var(--error) 55%, var(--border));
+    border-radius: 6px;
+    background: transparent;
+    color: var(--error);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+}
+
+.task-delete:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--error) 14%, transparent);
+}
+
+.task-delete:disabled {
+    cursor: wait;
+    opacity: 0.55;
 }
 
 @media (max-width: 640px) {

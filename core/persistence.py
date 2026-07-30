@@ -272,6 +272,30 @@ class AppStore:
             ).fetchall()
         return [self._decode_task(row) for row in rows]
 
+    def delete_task(self, user_id, task_id):
+        """Delete one task owned by a user and return its persisted record."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            ).fetchone()
+            if not row:
+                return None
+            db.execute(
+                "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
+        return self._decode_task(row)
+
+    def has_pdf_reference(self, user_id, pdf_path):
+        """Whether another task of this user still needs an uploaded PDF."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM tasks WHERE user_id = ? AND pdf_path = ? LIMIT 1",
+                (user_id, pdf_path),
+            ).fetchone()
+        return row is not None
+
     def mark_interrupted_tasks_paused(self):
         now = utc_now()
         with self._connect() as db:

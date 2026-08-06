@@ -19,6 +19,9 @@ from config import FFMPEG_BIN, FFPROBE_BIN, FPS
 from .video_engines import get_engine
 
 MAX_SCENE_DURATION = 90.0
+# Keep each FFmpeg filter graph bounded. Opening every scene from a long
+# document in one command can exceed a server's file-descriptor or memory limit.
+MAX_CONCAT_INPUTS = 16
 
 
 # ===== 基础工具 =====
@@ -38,7 +41,11 @@ def _run_ffmpeg(args, timeout=300):
         important = [line for line in lines if any(word in line.lower() for word in (
             'error', 'invalid', 'failed', 'non-monoton', 'timestamp', 'unable', 'could not'
         ))]
-        detail = " | ".join((important[-8:] or lines[-12:]))
+        # A stream-mapping line can be the final "important" line while the
+        # actual error is at the end of stderr. Keep both views for diagnosis.
+        selected = important[-8:]
+        tail = lines[-16:]
+        detail = " | ".join(selected + [line for line in tail if line not in selected])
         raise RuntimeError(f"ffmpeg 失败: {detail[-2500:]}")
 
 
@@ -271,7 +278,7 @@ def _concat_av_segments_filter(seg_paths, output_path):
         _safe_remove(script_path)
 
 
-def _concat_video_segments_filter(seg_paths, durations, output_path):
+def _concat_video_segments_filter_once(seg_paths, durations, output_path):
     """Concatenate silent video segments using the requested scene durations.
 
     Audio is deliberately kept out of this pass.  Encoding AAC independently
@@ -318,7 +325,51 @@ def _concat_video_segments_filter(seg_paths, durations, output_path):
         _safe_remove(script_path)
 
 
-def _mux_scene_audio(video_path, scenes, durations, output_path, use_tts=True):
+def _concat_video_segments_filter(seg_paths, durations, output_path):
+    """Concatenate silent scenes in bounded batches for long documents.
+
+    A single concat graph with dozens of MP4 inputs is fragile on constrained
+    servers.  Each batch is normalized exactly as before, then its output is
+    used as one input in the next round.  The requested scene duration remains
+    the source of truth, so batching does not alter the film timeline.
+    """
+    if not seg_paths:
+        raise RuntimeError("No video segments to concatenate")
+    if len(seg_paths) != len(durations):
+        raise RuntimeError("Video segment/duration count mismatch")
+    if len(seg_paths) <= MAX_CONCAT_INPUTS:
+        return _concat_video_segments_filter_once(seg_paths, durations, output_path)
+
+    batch_dir = tempfile.mkdtemp(
+        prefix="concat_video_", dir=os.path.dirname(os.path.abspath(output_path)) or None
+    )
+    current_paths = list(seg_paths)
+    current_durations = [max(1.0, float(duration)) for duration in durations]
+    round_index = 0
+    try:
+        while len(current_paths) > MAX_CONCAT_INPUTS:
+            next_paths = []
+            next_durations = []
+            for batch_index, start in enumerate(range(0, len(current_paths), MAX_CONCAT_INPUTS)):
+                paths = current_paths[start:start + MAX_CONCAT_INPUTS]
+                batch_durations = current_durations[start:start + MAX_CONCAT_INPUTS]
+                batch_path = os.path.join(
+                    batch_dir, f"video_{round_index:02d}_{batch_index:04d}.mp4"
+                )
+                _concat_video_segments_filter_once(paths, batch_durations, batch_path)
+                next_paths.append(batch_path)
+                next_durations.append(sum(batch_durations))
+            current_paths = next_paths
+            current_durations = next_durations
+            round_index += 1
+        return _concat_video_segments_filter_once(
+            current_paths, current_durations, output_path
+        )
+    finally:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+
+
+def _mux_scene_audio_once(video_path, scenes, durations, output_path, use_tts=True):
     """Mux one continuous scene audio timeline onto the concatenated video.
 
     All scene audio is decoded and concatenated before the single AAC encode.
@@ -369,6 +420,99 @@ def _mux_scene_audio(video_path, scenes, durations, output_path, use_tts=True):
         _run_ffmpeg(args, timeout=900)
     finally:
         _safe_remove(script_path)
+
+
+def _render_scene_audio_batch(scenes, durations, output_path, use_tts=True):
+    """Render one bounded set of scene narration/silence to a PCM WAV file."""
+    input_args = []
+    filter_lines = []
+    audio_labels = []
+    for index, (scene, duration) in enumerate(zip(scenes, durations)):
+        audio_path = _valid_audio_path(scene.get("audio_path")) if use_tts else None
+        if audio_path:
+            input_args.extend(["-i", audio_path])
+        else:
+            input_args.extend([
+                "-f", "lavfi", "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=44100",
+            ])
+        duration_text = f"{max(1.0, float(duration)):.6f}"
+        filter_lines.append(
+            f"[{index}:a]aresample=44100:async=1:first_pts=0,"
+            f"asetpts=PTS-STARTPTS,apad,atrim=duration={duration_text},"
+            f"asetpts=PTS-STARTPTS[a{index}]"
+        )
+        audio_labels.append(f"[a{index}]")
+    filter_lines.append(
+        "".join(audio_labels) + f"concat=n={len(scenes)}:v=0:a=1[aout]"
+    )
+    script_path = output_path + ".filter.txt"
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write(";\n".join(filter_lines))
+    total_text = f"{sum(max(1.0, float(d)) for d in durations):.6f}"
+    args = [
+        "-y", *input_args,
+        "-filter_complex_script", script_path, "-map", "[aout]",
+        "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2",
+        "-map_metadata", "-1", "-t", total_text, output_path,
+    ]
+    try:
+        _run_ffmpeg(args, timeout=900)
+    finally:
+        _safe_remove(script_path)
+
+
+def _concat_wav_batches(batch_paths, output_path):
+    """Join already-normalized PCM WAV batches without a large filter graph."""
+    list_path = output_path + ".concat.txt"
+    with open(list_path, "w", encoding="utf-8") as handle:
+        for path in batch_paths:
+            normalized = os.path.abspath(path).replace("\\", "/").replace("'", "'\\''")
+            handle.write(f"file '{normalized}'\n")
+    try:
+        _run_ffmpeg([
+            "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+            "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2",
+            "-map_metadata", "-1", output_path,
+        ], timeout=900)
+    finally:
+        _safe_remove(list_path)
+
+
+def _mux_scene_audio(video_path, scenes, durations, output_path, use_tts=True):
+    """Mux narration onto video, batching long scene lists to protect FFmpeg."""
+    if len(scenes) != len(durations):
+        raise RuntimeError("Scene/duration count mismatch")
+    if len(scenes) <= MAX_CONCAT_INPUTS:
+        return _mux_scene_audio_once(video_path, scenes, durations, output_path, use_tts)
+
+    batch_dir = tempfile.mkdtemp(
+        prefix="concat_audio_", dir=os.path.dirname(os.path.abspath(output_path)) or None
+    )
+    try:
+        batch_paths = []
+        for batch_index, start in enumerate(range(0, len(scenes), MAX_CONCAT_INPUTS)):
+            batch_path = os.path.join(batch_dir, f"audio_{batch_index:04d}.wav")
+            _render_scene_audio_batch(
+                scenes[start:start + MAX_CONCAT_INPUTS],
+                durations[start:start + MAX_CONCAT_INPUTS], batch_path, use_tts,
+            )
+            batch_paths.append(batch_path)
+
+        combined_audio = os.path.join(batch_dir, "combined.wav")
+        _concat_wav_batches(batch_paths, combined_audio)
+        total_text = f"{sum(max(1.0, float(d)) for d in durations):.6f}"
+        _run_ffmpeg([
+            "-y", "-i", video_path, "-i", combined_audio,
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-ar", "44100", "-ac", "2", "-t", total_text,
+            "-map_metadata", "-1", "-avoid_negative_ts", "make_zero",
+            "-muxdelay", "0", "-muxpreload", "0", output_path,
+        ], timeout=900)
+        return output_path
+    finally:
+        shutil.rmtree(batch_dir, ignore_errors=True)
 
 
 def _mix_bgm(video_path, output_path, bgm_path, bgm_volume=0.15):

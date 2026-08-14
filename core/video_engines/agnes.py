@@ -183,9 +183,9 @@ class AgnesVideoEngine(VideoEngine):
             if fade_out:
                 filters.append(f"fade=t=out:st={max(0.0, duration - 1.0):.6f}:d=1.0")
             command = [
-                FFMPEG_BIN, "-y", "-i", downloaded,
+                FFMPEG_BIN, "-y", "-filter_threads", "1", "-threads", "1", "-i", downloaded,
                 "-an", "-vf", ",".join(filters), "-t", f"{duration:.6f}",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                "-c:v", "libx264", "-preset", "medium", "-threads", "2", "-crf", "20",
                 "-pix_fmt", "yuv420p", out_path,
             ]
             result = subprocess.run(command, capture_output=True, text=True, timeout=600)

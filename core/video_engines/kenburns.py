@@ -117,12 +117,12 @@ class KenBurnsEngine(VideoEngine):
             filter_str += f",fade=t=out:st={fade_out_start}:d=1.0"
 
         args = [
-            "-y", "-loop", "1", "-i", prepared,
+            "-y", "-filter_threads", "1", "-loop", "1", "-i", prepared,
             "-vf", filter_str,
             "-t", str(duration),
             "-r", str(FPS),
             "-pix_fmt", "yuv420p",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:v", "libx264", "-preset", "medium", "-threads", "2", "-crf", "20",
             out_path,
         ]
 

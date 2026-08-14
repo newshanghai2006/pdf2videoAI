@@ -21,7 +21,9 @@ from .video_engines import get_engine
 MAX_SCENE_DURATION = 90.0
 # Keep each FFmpeg filter graph bounded. Opening every scene from a long
 # document in one command can exceed a server's file-descriptor or memory limit.
-MAX_CONCAT_INPUTS = 16
+MAX_CONCAT_INPUTS = 8
+FFMPEG_INPUT_THREADS = "1"
+FFMPEG_OUTPUT_THREADS = "2"
 
 
 # ===== 基础工具 =====
@@ -243,7 +245,10 @@ def _concat_av_segments_filter(seg_paths, output_path):
     concat_inputs = []
     input_args = []
     for index, path in enumerate(seg_paths):
-        input_args.extend(["-i", path])
+        # H.264 defaults to several decoder threads per input. A concat graph
+        # then multiplies that allocation by its input count and can fail with
+        # "h264 ... get_buffer failed" on smaller servers.
+        input_args.extend(["-threads", FFMPEG_INPUT_THREADS, "-i", path])
         duration = _get_stream_duration(path, "v:0", 1.0)
         duration_text = f"{duration:.6f}"
         filter_lines.append(
@@ -263,7 +268,7 @@ def _concat_av_segments_filter(seg_paths, output_path):
     with open(script_path, "w", encoding="utf-8") as handle:
         handle.write(";\n".join(filter_lines))
     args = [
-        "-y", *input_args,
+        "-y", "-filter_threads", "1", "-filter_complex_threads", "1", *input_args,
         "-filter_complex_script", script_path,
         "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
@@ -295,7 +300,9 @@ def _concat_video_segments_filter_once(seg_paths, durations, output_path):
     input_args = []
     concat_inputs = []
     for index, (path, duration) in enumerate(zip(seg_paths, durations)):
-        input_args.extend(["-i", path])
+        # Limit decoder allocation for every source. Without this, FFmpeg may
+        # create a decoder thread pool per H.264 input and exhaust server RAM.
+        input_args.extend(["-threads", FFMPEG_INPUT_THREADS, "-i", path])
         duration_text = f"{max(1.0, float(duration)):.6f}"
         filter_lines.append(
             f"[{index}:v]setpts=PTS-STARTPTS,fps={FPS},"
@@ -311,10 +318,10 @@ def _concat_video_segments_filter_once(seg_paths, durations, output_path):
     with open(script_path, "w", encoding="utf-8") as handle:
         handle.write(";\n".join(filter_lines))
     args = [
-        "-y", *input_args,
+        "-y", "-filter_threads", "1", "-filter_complex_threads", "1", *input_args,
         "-filter_complex_script", script_path,
         "-map", "[vout]",
-        "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-an", "-c:v", "libx264", "-preset", "medium", "-threads", FFMPEG_OUTPUT_THREADS, "-crf", "20",
         "-pix_fmt", "yuv420p", "-r", str(FPS), "-fps_mode", "cfr",
         "-map_metadata", "-1", "-avoid_negative_ts", "make_zero",
         "-video_track_timescale", "90000", output_path,

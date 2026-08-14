@@ -498,8 +498,12 @@ AI 理解或 AI 生图失败时，任务会暂停并显示“无 AI 继续”和
 python -m pip --python .venv\Scripts\python.exe install easyocr
 ```
 
-OCR 引擎只在 OCR 阶段按选择加载，不会在 Flask 启动时同时导入所有引擎。EasyOCR 首次使用可能下载模型，
-RapidOCR 则要求 `rapidocr_onnxruntime` 与当前 Python/ONNXRuntime 版本匹配。
+OCR 引擎只在 OCR 阶段按选择加载，不会在 Flask 启动时同时导入所有引擎。实际识别在独立子进程中
+执行：RapidOCR/ONNXRuntime 初始化超过 120 秒、单页超过 90 秒无进展或总 OCR 时间超过 1800 秒时，
+程序会终止该子进程并返回明确错误，不会让网页永久停在 1%。可通过环境变量
+`OCR_STARTUP_TIMEOUT_SECONDS`、`OCR_PAGE_TIMEOUT_SECONDS` 和 `OCR_TOTAL_TIMEOUT_SECONDS` 调整这些
+上限。EasyOCR 首次使用可能下载模型，RapidOCR 则要求 `rapidocr_onnxruntime` 与当前 Python/ONNXRuntime
+版本匹配；若 RapidOCR 初始化超时，请在页面切换到 EasyOCR，或重新安装匹配的 RapidOCR/ONNXRuntime。
 
 Windows 的 `install.bat` 使用 `venv --without-pip` 创建项目环境，再通过系统 pip 的 `--python`
 选项把依赖安装到 `.venv`。这是为了绕过部分 Python 3.14 + Windows Python Manager 环境中
@@ -587,6 +591,7 @@ pdf2video/
 │   ├── captcha_service.py      # Security_center 同款点阵字形、干扰线图形验证码
 │   ├── persistence.py          # SQLite 用户、会话、验证码、任务和检查点持久化
 │   ├── ocr_processor.py        # OCR 文字识别（RapidOCR）
+│   ├── ocr_worker.py           # 可终止的 OCR 子进程：防止 ONNXRuntime 初始化永久阻塞任务
 │   ├── story_analyzer.py       # AI 剧情理解（OpenAI Chat Completions 兼容接口）
 │   ├── image_generator.py      # OpenAI/NVIDIA/Agnes 生图与 Agnes 图生图
 │   ├── prompt_optimizer.py     # 中国题材人物、年代、服饰/军服与建筑文化准确性约束
@@ -877,7 +882,8 @@ SAPI 语音。若日志仍显示“本地中文 TTS 回退也不可用”，请�
 如果任务目录尚未创建、FFmpeg 进程也不存在，通常卡在 OCR 引擎加载，而不是视频合成。
 程序支持在界面选择 `RapidOCR` 或 `EasyOCR`，并且只在真正需要 OCR 时加载所选引擎；Python 3.14
 可以使用 EasyOCR，但 RapidOCR 是否可用取决于本机 `rapidocr_onnxruntime` 与 ONNXRuntime 的匹配版本。
-如果某个引擎加载无响应，可切换另一个引擎；也可以在 Python 3.10/3.11 的独立 venv 中安装对应依赖。
+OCR 已在独立子进程中设置初始化、单页和总时长上限；超过上限会显示引擎和具体页码，而不是永久显示 1%。
+如果某个引擎加载无响应，可返回配置页切换另一个引擎；也可以在 Python 3.10/3.11 的独立 venv 中安装对应依赖。
 OCR 推理阶段会限制 OpenBLAS/ONNX 线程数，将输入缩放到最大 1200px，并在失败时使用 800px 图片重试。
 
 ### Q: 生成速度慢？

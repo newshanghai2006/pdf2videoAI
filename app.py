@@ -639,24 +639,16 @@ def run_pipeline(task_id, pdf_path, config):
         checkpoint = dict(task_record.get('checkpoint') or {})
         persisted_scenes = list(task_record.get('scenes') or [])
         _check_pause(task_id)
-        # Report module initialization before importing OCR/ONNXRuntime. On
-        # incompatible Python runtimes that import can take a long time, and
-        # leaving the task at 0% makes it look as though the request failed.
+        # Do not import every optional AI/video component before PDF work.
+        # A slow native module must never make the first visible stage appear
+        # to be an OCR failure before the PDF pipeline has even started.
         update_task(task_id, status='running', phase='init', progress=1,
                     pause_requested=False, error=None,
-                    message='正在加载处理组件（首次加载 OCR/ONNXRuntime 可能需要一些时间）...')
+                    message='正在准备 PDF 处理组件...')
         import sys
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
         from core.pdf_processor import extract_pages
-        from core.story_analyzer import analyze_story
-        from core.image_generator import generate_all_scenes
-        from core.image_generator import colorize_pages
-        from core.tts_engine import generate_scene_narrations
-        from core.video_builder import build_film
-        from core.video_prompt import build_prompts_document
-        from core.subtitle_builder import build_srt
-        from config import ART_STYLES
 
         api_key = config.get('llm_api_key') or config.get('api_key', '')
         base_url = config.get('llm_base_url') or config.get('base_url', '')
@@ -748,10 +740,10 @@ def run_pipeline(task_id, pdf_path, config):
             ocr_results = cached_ocr
             update_task(task_id, progress=25, message='已复用预览阶段 OCR 结果')
         else:
-            # Load RapidOCR only when OCR is actually needed. This keeps
-            # manual runs with cached preview text from importing ONNXRuntime.
-            from core.ocr_processor import ocr_pages
-            ocr_results = ocr_pages(
+            # OCR runs in a child process with startup/page timeouts, so a
+            # stuck ONNXRuntime model cannot leave this task at 1% forever.
+            from core.ocr_processor import ocr_pages_with_timeout
+            ocr_results = ocr_pages_with_timeout(
                 page_images,
                 language=ocr_language,
                 engine=ocr_engine,
@@ -789,6 +781,7 @@ def run_pipeline(task_id, pdf_path, config):
             update_task(task_id, message='已从检查点复用剧情分析结果')
         else:
             if use_ai_analysis:
+                from core.story_analyzer import analyze_story
                 while True:
                     try:
                         if story_ocr_results:
@@ -858,6 +851,7 @@ def run_pipeline(task_id, pdf_path, config):
         # 放在画面生成之前：即使后续步骤失败，提示词也已产出可下载。
         if export_prompts and scenes:
             try:
+                from core.video_prompt import build_prompts_document
                 doc = build_prompts_document(
                     scenes,
                     title=story.get('title', ''),
@@ -887,6 +881,7 @@ def run_pipeline(task_id, pdf_path, config):
                 or page_images[scene_index % len(page_images)]
             )
         if colorize_pages_enabled:
+            from core.image_generator import colorize_pages
             color_dir = os.path.join(work_dir, 'color_pages')
             while True:
                 try:
@@ -914,6 +909,7 @@ def run_pipeline(task_id, pdf_path, config):
                     update_task(task_id, message='彩色美化已跳过，继续使用 PDF 原页面')
                     break
         elif use_image_generation:
+            from core.image_generator import generate_all_scenes
             scenes_dir = os.path.join(work_dir, 'scenes')
             while True:
                 try:
@@ -1038,6 +1034,7 @@ def run_pipeline(task_id, pdf_path, config):
             update_task(task_id, scenes=scenes, progress=85,
                         message='已从检查点复用 TTS 配音')
         elif use_tts:
+            from core.tts_engine import generate_scene_narrations
             narration_prompt = '\n'.join(str(scene.get('narration') or '') for scene in scenes)
             confirmed_text = wait_for_decision(
                 task_id, 'TTS 伴读文本确认', '请检查并确认每个场景的伴读文字',
@@ -1077,6 +1074,7 @@ def run_pipeline(task_id, pdf_path, config):
             _set_checkpoint(task_id, 'tts')
 
         # 字幕时间轴与影片使用相同的场景时长规则。
+        from core.subtitle_builder import build_srt
         subtitle_path = os.path.join(work_dir, 'subtitles.srt')
         build_srt(scenes, subtitle_path, use_tts=tts_ok,
                   auto_duration_tts=auto_duration_tts)
@@ -1094,6 +1092,7 @@ def run_pipeline(task_id, pdf_path, config):
         if checkpoint.get('build') and os.path.exists(video_output):
             update_task(task_id, progress=99, message='已从检查点复用合成影片')
         else:
+            from core.video_builder import build_film
             build_film(
                 scenes, video_output, width, height,
                 bgm_path=bgm_file, bgm_volume=bgm_volume,
@@ -1556,7 +1555,6 @@ def ocr_preview():
     try:
         import tempfile
         from core.pdf_processor import extract_pages
-        from core.ocr_processor import ocr_pages
         from core.pdf_processor import parse_page_selection
         from core.pdf_processor import get_page_count
         total = get_page_count(pdf_path)
@@ -1567,7 +1565,8 @@ def ocr_preview():
             images = extract_pages(pdf_path, work, start_page=min(pages), end_page=max(pages))
             wanted = {p: os.path.join(work, f'page_{p:04d}.png') for p in pages}
             images = [wanted[p] for p in pages if os.path.exists(wanted[p])]
-            results = ocr_pages(
+            from core.ocr_processor import ocr_pages_with_timeout
+            results = ocr_pages_with_timeout(
                 images,
                 language=data.get('ocr_language', 'ch'),
                 engine=data.get('ocr_engine', 'rapidocr'),

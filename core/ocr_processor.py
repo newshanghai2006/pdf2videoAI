@@ -3,6 +3,10 @@
 import os
 import re
 import tempfile
+import json
+import subprocess
+import sys
+import time
 # 必须在导入 OpenCV/ONNXRuntime 前设置，避免本地推理创建过多 BLAS 线程并耗尽内存。
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -11,6 +15,9 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 # 全局 OCR 实例（避免重复加载模型）
 _ocr_engine = None
 _ocr_engine_name = None
+OCR_STARTUP_TIMEOUT_SECONDS = max(30, int(os.environ.get("OCR_STARTUP_TIMEOUT_SECONDS", "120")))
+OCR_PAGE_TIMEOUT_SECONDS = max(30, int(os.environ.get("OCR_PAGE_TIMEOUT_SECONDS", "90")))
+OCR_TOTAL_TIMEOUT_SECONDS = max(300, int(os.environ.get("OCR_TOTAL_TIMEOUT_SECONDS", "1800")))
 
 
 def get_ocr_engine(language="ch", engine="rapidocr"):
@@ -194,3 +201,113 @@ def ocr_pages(image_paths, progress_callback=None, language="ch", engine="rapido
             progress_callback(i + 1, total, f"OCR识别 {i + 1}/{total}")
 
     return results
+
+
+def _write_json_atomic(path, payload):
+    temporary = path + ".part"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+    os.replace(temporary, path)
+
+
+def _stop_process(process):
+    if process.poll() is not None:
+        return
+    try:
+        # TerminateProcess returns immediately on Windows. Do not invoke a
+        # shell-level task killer here: a broken native runtime can make that
+        # command block and would defeat the timeout protecting this task.
+        process.terminate()
+        process.wait(timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            process.kill()
+            process.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
+def ocr_pages_with_timeout(image_paths, progress_callback=None, language="ch", engine="rapidocr"):
+    """Run OCR in a killable child process instead of blocking a task thread.
+
+    Native ONNX initialization can become stuck on a server because of an
+    incompatible runtime, a model-file lock, or security software. Threads
+    cannot stop native code safely, while a child process can be terminated.
+    """
+    if not image_paths:
+        return []
+    work_dir = tempfile.mkdtemp(prefix="pdf2video_ocr_")
+    request_path = os.path.join(work_dir, "request.json")
+    result_path = os.path.join(work_dir, "results.json")
+    progress_path = os.path.join(work_dir, "progress.json")
+    worker_path = os.path.join(os.path.dirname(__file__), "ocr_worker.py")
+    _write_json_atomic(request_path, {
+        "image_paths": list(image_paths),
+        "language": language,
+        "engine": engine,
+        "result_path": result_path,
+        "progress_path": progress_path,
+    })
+    process = None
+    started = time.monotonic()
+    last_progress = started
+    last_current = 0
+    total = len(image_paths)
+    try:
+        process = subprocess.Popen(
+            [sys.executable, worker_path, request_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if progress_callback:
+            progress_callback(0, total, f"正在启动 {engine} OCR 引擎...")
+        while process.poll() is None:
+            now = time.monotonic()
+            try:
+                with open(progress_path, "r", encoding="utf-8") as handle:
+                    progress = json.load(handle)
+            except (OSError, ValueError, TypeError):
+                progress = {}
+            current = max(0, min(total, int(progress.get("current", 0) or 0)))
+            if current > last_current:
+                last_current = current
+                last_progress = now
+            if progress_callback:
+                if current:
+                    progress_callback(current, total, progress.get("message") or f"OCR识别 {current}/{total}")
+                else:
+                    elapsed = int(now - started)
+                    progress_callback(0, total, f"正在加载 {engine} OCR 引擎（{elapsed}/{OCR_STARTUP_TIMEOUT_SECONDS} 秒）...")
+            if not last_current and now - started > OCR_STARTUP_TIMEOUT_SECONDS:
+                raise TimeoutError(
+                    f"{engine} OCR 初始化超过 {OCR_STARTUP_TIMEOUT_SECONDS} 秒。"
+                    "请检查服务器内存、ONNXRuntime 安装和模型文件权限，或在页面改选 EasyOCR。"
+                )
+            if last_current and now - last_progress > OCR_PAGE_TIMEOUT_SECONDS:
+                raise TimeoutError(
+                    f"{engine} OCR 在第 {last_current + 1} 页超过 {OCR_PAGE_TIMEOUT_SECONDS} 秒未完成。"
+                    "请缩小页码范围后重试，或改选 EasyOCR。"
+                )
+            if now - started > OCR_TOTAL_TIMEOUT_SECONDS:
+                raise TimeoutError(
+                    f"OCR 总处理超过 {OCR_TOTAL_TIMEOUT_SECONDS} 秒，任务已停止。"
+                    "请缩小页码范围或检查服务器资源。"
+                )
+            time.sleep(1)
+        _, stderr = process.communicate(timeout=5)
+        if process.returncode != 0:
+            raise RuntimeError(f"{engine} OCR 子进程失败: {(stderr or '').strip()[-1600:]}")
+        with open(result_path, "r", encoding="utf-8") as handle:
+            results = json.load(handle)
+        if not isinstance(results, list) or len(results) != total:
+            raise RuntimeError(f"{engine} OCR 子进程未返回完整结果")
+        return results
+    finally:
+        if process is not None:
+            _stop_process(process)
+        try:
+            import shutil
+            shutil.rmtree(work_dir, ignore_errors=True)
+        except OSError:
+            pass

@@ -1,5 +1,7 @@
 # PDF → AI 影片生成系统
 
+[中文](README.md) | [English](README_EN.md)
+
 将扫描版连环画 PDF 作为"剧本"，通过 AI 读懂文字与台词、理解剧情、重新生成彩色画面，最终合成带运镜和配音的影片。
 
 ---
@@ -583,6 +585,7 @@ pdf2video/
 ├── run.bat / run.sh            # 一键启动服务（Windows / *nix）
 ├── stop.bat / stop.sh          # 一键停止服务（按 5000 端口精确结束）
 ├── README.md                   # 本文件
+├── README_EN.md                # English documentation
 │
 ├── core/                       # 核心处理模块
 │   ├── __init__.py
@@ -647,6 +650,7 @@ static/
 .env.example
 .gitignore
 README.md
+README_EN.md
 install.bat / install.sh
 run.bat / run.sh
 stop.bat / stop.sh

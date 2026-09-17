@@ -189,6 +189,7 @@ SMTP_FROM=AI Film Studio <noreply@example.com>
 | **视频引擎** | 可选“静态全画面”、默认 `Ken Burns`、Seedance 占位引擎，或已接入的 `Agnes Video V2.0` 异步视频引擎 |
 | **艺术风格** | 见下方风格列表 |
 | **生成AI视频提示词** | 可选开关。勾选后额外产出一份**中英双语视频提示词**（含镜头运动/时长/负向词），可复制粘贴到火山 Seedance / 即梦 / 可灵 / Runway 等**网页版**工具手动生成视频——不走 API、零额外费用。完成后在第四步「下载AI视频提示词」 |
+| **导出 ComfyUI 项目包** | 可选开关，要求启用 AI 剧情分析。AI 会额外确定主要人物形象、标记最多 8 个重点场景；完成后可下载 ComfyUI 工作流 JSON 和含场景图/角色参考图/完整提示词的 ZIP 项目包 |
 | **TTS 配音** | 开关 + **旁白语音** + **对白语音**（两者用不同声音）+ 语速 |
 | **按 TTS 时长自动延长片段** | 勾选后片段至少使用手动时长；若有效 TTS 更长则自动延长，例如设置 6 秒、配音 20 秒时使用 20 秒 |
 | **背景音乐** | 可选上传 BGM 文件 + 调整音量 |
@@ -471,6 +472,16 @@ AI 理解或 AI 生图失败时，任务会暂停并显示“无 AI 继续”和
 
 - 生成完成后，页面内嵌播放器可在线预览影片
 - 点击"下载影片"按钮保存 MP4 文件到本地
+- 若勾选 **导出 ComfyUI 项目包**，还可下载 `comfyui_workflow_*.json` 与 `comfyui_project_*.zip`；后者包含工作流、重点场景图片、角色参考图片、角色设定和全场景提示词
+
+#### ComfyUI 项目包
+
+ComfyUI 的 `LoadImage` 节点按文件名读取其 `input/` 目录，不能可靠地把图片二进制直接嵌入工作流 JSON。因此程序提供两个互补下载：
+
+1. **ComfyUI 工作流 JSON**：可直接拖入 ComfyUI 画布，使用核心 `LoadImage`、`ImageScale`、`RepeatImageBatch`、`ImageBatch` 节点以及 VideoHelperSuite 的 `VHS_VideoCombine` 节点，把 AI 标记的最多 8 个重点场景按各自建议时长合成为 MP4。
+2. **ComfyUI 项目包 ZIP**：包含上述 JSON、`assets/scenes/` 下的重点及全部场景图片、`assets/characters/` 下的角色参考图、`project_manifest.json`（人物形象、所有场景、旁白、正负提示词）和导入说明。
+
+使用方法：安装 [ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)，解压 ZIP 后把 `assets/scenes/` 中的 PNG 复制至 ComfyUI 的 `input/` 目录，再将 `comfyui_workflow.json` 拖入画布并点击 Queue Prompt。工作流生成的是重点场景图的自动拼接视频；若希望每个镜头具有 AI 动态效果，可在自己的 ComfyUI 安装中把对应图片和 `project_manifest.json` 内的提示词接入已安装的 Wan、LTX-Video、HunyuanVideo 等图生视频节点。不同视频模型所需的自定义节点和模型文件不同，程序不会假设服务器已安装其中任何一种。
 - 点击“下载字幕 SRT”保存与场景音画时间轴对应的字幕文件；包含旁白和对白
 
 ---
@@ -602,6 +613,7 @@ pdf2video/
 │   ├── tts_engine.py           # TTS 配音（旁白/对白双声音，去角色名前缀）
 │   ├── subtitle_builder.py     # 按场景实际时长生成 SRT 字幕
 │   ├── video_prompt.py         # 生成可粘贴到网页版AI视频工具的中英双语提示词（本地拼装）
+│   ├── comfyui_export.py       # 导出 ComfyUI 工作流、场景素材、角色参考图和项目包
 │   ├── video_builder.py        # 影片合成：逐场景音画对齐 + 拼接 + BGM
 │   └── video_engines/          # 视频引擎（可扩展）
 │       ├── __init__.py         #   引擎工厂 get_engine()
@@ -822,6 +834,8 @@ OCR 伴读文字进入 TTS 前会直接去除换行符，不插入额外空格�
 | GET | `/api/scene_image/<task_id>/<scene_idx>` | 获取场景 AI 图片 |
 | GET | `/api/download/<task_id>` | 下载影片 |
 | GET | `/api/download_prompts/<task_id>` | 下载 AI 视频提示词（.txt，需开启该功能） |
+| GET | `/api/download_comfyui_workflow/<task_id>` | 下载可导入的 ComfyUI 工作流 JSON |
+| GET | `/api/download_comfyui_project/<task_id>` | 下载含图片、角色设定和提示词的 ComfyUI ZIP 项目包 |
 | GET | `/api/download_subtitles/<task_id>` | 下载影片字幕（SRT） |
 | GET | `/api/preview/<task_id>` | 在线预览影片 |
 | POST | `/api/upload_bgm` | 上传背景音乐 |

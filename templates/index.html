@@ -251,6 +251,13 @@
                                 生成AI视频提示词 <span class="hint">(可复制粘贴到火山/即梦等网页工具)</span>
                             </label>
                         </div>
+                        <div class="form-group">
+                            <label title="基于 AI 剧情分析生成 ComfyUI 工作流、重点场景、角色设定和参考图项目包">
+                                <input type="checkbox" id="exportComfyui">
+                                导出 ComfyUI 项目包 <span class="hint">(工作流 JSON + 重点场景图 + 角色参考图，需启用 AI 剧情分析)</span>
+                            </label>
+                            <p class="hint-text">项目包使用 ComfyUI 核心图片节点和 VideoHelperSuite 视频合成节点；下载后按包内说明复制图片到 ComfyUI 的 input 目录。</p>
+                        </div>
                         <div class="form-row">
                             <div class="form-group">
                                 <label>画面方向</label>
@@ -437,6 +444,10 @@
                         <a class="btn btn-outline" id="btnDownloadSubtitles" href="#" download>下载字幕 SRT</a>
                         <a class="btn btn-outline" id="btnDownloadPrompts" href="#" download
                            style="display:none;">📝 下载AI视频提示词</a>
+                        <a class="btn btn-outline" id="btnDownloadComfyWorkflow" href="#" download
+                           style="display:none;">下载 ComfyUI 工作流 JSON</a>
+                        <a class="btn btn-outline" id="btnDownloadComfyProject" href="#" download
+                           style="display:none;">下载 ComfyUI 项目包 ZIP</a>
                     </div>
                 </div>
             </section>
@@ -462,6 +473,6 @@
         </section>
     </div>
 
-    <script src="{{ url_for('static', filename='js/app.js', v='20260729-2') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js', v='20260917-1') }}"></script>
 </body>
 </html>

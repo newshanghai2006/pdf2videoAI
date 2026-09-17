@@ -250,7 +250,7 @@ def _normalize_batch_page_sources(scenes, batch_pages, empty_pages=None):
 
 def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=None,
                   llm_model=None, progress_callback=None, _direct_request=False,
-                  _document_period_context=None):
+                  _document_period_context=None, include_comfy_assets=False):
     """用 LLM 分析 OCR 文字，拆分为场景并生成画面提示词。
 
     Args:
@@ -283,6 +283,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
         batches = [ocr_results[i:i + batch_size]
                    for i in range(0, len(ocr_results), batch_size)]
         merged = {'title': '', 'summary': '', 'characters': [], 'scenes': []}
+        if include_comfy_assets:
+            merged['character_bible'] = []
         summaries = []
 
         def analyze_batch(batch, batch_number, single_page_retry=True):
@@ -293,6 +295,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                     base_url=base_url, llm_model=llm_model,
                     _direct_request=True,
                     _document_period_context=_document_period_context,
+                    include_comfy_assets=include_comfy_assets,
                 )
                 return [(batch, part)]
             except StoryJSONError as error:
@@ -343,6 +346,10 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                 for character in part.get('characters', []):
                     if character not in merged['characters']:
                         merged['characters'].append(character)
+                if include_comfy_assets:
+                    for character in part.get('character_bible', []):
+                        if character not in merged['character_bible']:
+                            merged['character_bible'].append(character)
                 merged['scenes'].extend(part.get('scenes', []))
         for index, scene in enumerate(merged['scenes'], 1):
             scene['scene_number'] = index
@@ -372,6 +379,26 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 
     full_text = "\n\n".join(pages_text)
 
+    comfy_schema = ""
+    comfy_notes = ""
+    comfy_scene_field = ""
+    if include_comfy_assets:
+        comfy_schema = '''
+  "character_bible": [
+    {
+      "name": "角色姓名",
+      "identity": "身份、阵营、年代和国籍",
+      "appearance_prompt": "English appearance prompt for a consistent character reference image",
+      "consistency_prompt": "English traits that must remain consistent in later scenes",
+      "reference_page": 1
+    }
+  ],'''
+        comfy_notes = '''
+- character_bible 只列主要人物（最多 6 人）；appearance_prompt 必须为英文，写清年龄段、面部特征、发型、服饰/军服、道具、年代和国籍，禁止只写 Asian
+- 为剧情转折、人物首次清晰出现、关键行动或高潮场景把 is_key_scene 设为 true；全片最多 8 个 true
+'''
+        comfy_scene_field = '      "is_key_scene": false,\n'
+
     system_prompt = f"""你是一位专业的电影编剧和视觉导演。你正在分析一部中国题材连环画（漫画）的扫描OCR文字，需要将其转化为电影剧本和分镜方案。作品可能发生在古代、近现代或当代，必须先根据原文识别准确年代，不得默认成古装题材。
 
 你的任务：
@@ -393,6 +420,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
   "title": "故事标题",
   "summary": "故事概述（1-2句话）",
   "characters": ["角色1", "角色2"],
+{comfy_schema}
   "scenes": [
     {{
       "scene_number": 1,
@@ -400,7 +428,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
       "narration": "这一场景的旁白文字（中文，用于TTS配音，描述发生了什么）",
       "dialogue": ["角色名: 台词内容"],
       "image_prompt": "A detailed English prompt for AI image generation. State the exact year or period, country, location and character nationality, with period-accurate clothing or uniforms, equipment, architecture and props, then describe action, lighting and composition. Style: {style_desc}.",
-      "mood": "tense|calm|heroic|tragic|joyful|mysterious|epic",
+{comfy_scene_field}      "mood": "tense|calm|heroic|tragic|joyful|mysterious|epic",
       "duration": 5
     }}
   ]
@@ -418,7 +446,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 - 如果OCR文字不完整，请根据上下文和常识合理推断补充
 - title 不超过40个汉字，summary 不超过120个汉字，每个 image_prompt 不超过120个英文单词
 - 不要重复说明任务、JSON格式或输入原文，输出到最后一个场景后立即结束JSON
-- duration 根据场景复杂度建议3-8秒"""
+- duration 根据场景复杂度建议3-8秒
+{comfy_notes}"""
 
     if progress_callback:
         progress_callback(0, 1, "AI正在理解剧情...")

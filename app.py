@@ -695,6 +695,7 @@ def run_pipeline(task_id, pdf_path, config):
         image_size_tier = config.get('image_size_tier', '1K')
         video_engine = config.get('video_engine', DEFAULT_VIDEO_ENGINE)
         export_prompts = config.get('export_prompts', False)
+        export_comfyui = config.get('export_comfyui', False)
         cover_mode = config.get('cover_mode', 'none')
         cover_path = config.get('cover_path', '')
         cover_duration = max(1.0, float(config.get('cover_duration', 3) or 3))
@@ -790,6 +791,7 @@ def run_pipeline(task_id, pdf_path, config):
                                 base_url=base_url, llm_model=llm_model or None,
                                 progress_callback=lambda c, t, m: _pipeline_progress(
                                     task_id, progress=28 + int(c / (t or 1) * 7), message=m),
+                                include_comfy_assets=export_comfyui,
                             )
                         else:
                             story = {'title': 'PDF 封面', 'scenes': []}
@@ -1023,6 +1025,22 @@ def run_pipeline(task_id, pdf_path, config):
         checkpoint['generate'] = True
         _set_checkpoint(task_id, 'generate')
 
+        # ===== Optional ComfyUI export =====
+        # This is deliberately separate from the rendering pipeline: it only
+        # copies finished assets and writes a project package for download.
+        if export_comfyui:
+            existing_comfy = (get_task(task_id).get('checkpoint') or {}).get('comfyui_export') or {}
+            archive_path = existing_comfy.get('archive_path', '')
+            if not archive_path or not os.path.exists(archive_path):
+                update_task(task_id, progress=74,
+                            message='正在整理 ComfyUI 工作流、角色参考图和重点场景...')
+                from core.comfyui_export import build_comfyui_project
+                comfy_export = build_comfyui_project(
+                    work_dir, story, scenes, ART_STYLES.get(art_style, ''), width, height,
+                )
+                _set_checkpoint(task_id, 'comfyui', comfyui_export=comfy_export)
+            update_task(task_id, message='ComfyUI 项目包已生成，可在完成后下载')
+
         # ===== 阶段5: TTS 配音 =====
         tts_ok = False
         tts_checkpoint_path = os.path.join(work_dir, 'scenes_tts.json')
@@ -1179,6 +1197,7 @@ def _launch_task(task_id, pdf_path, config, task_updates=None):
 
 
 def _task_summary(task):
+    comfy_export = (task.get('checkpoint') or {}).get('comfyui_export') or {}
     return {
         'id': task.get('id'),
         'pdf_name': task.get('pdf_name') or os.path.basename(task.get('pdf_path', '')),
@@ -1192,6 +1211,7 @@ def _task_summary(task):
         'has_video': bool(task.get('result_path') and os.path.exists(task['result_path'])),
         'has_subtitles': bool(task.get('subtitle_path') and os.path.exists(task['subtitle_path'])),
         'has_prompts': bool(task.get('prompts_path') and os.path.exists(task['prompts_path'])),
+        'has_comfyui': bool(comfy_export.get('archive_path') and os.path.exists(comfy_export['archive_path'])),
     }
 
 
@@ -1595,8 +1615,11 @@ def start_process():
 
     api_key = data.get('llm_api_key', '').strip() or data.get('api_key', '').strip()
     use_ai_analysis = bool(data.get('use_ai_analysis', True))
+    export_comfyui = bool(data.get('export_comfyui', False))
     if use_ai_analysis and not api_key:
         return jsonify({'error': '请填写 LLM API Key'}), 400
+    if export_comfyui and not use_ai_analysis:
+        return jsonify({'error': '导出 ComfyUI 项目包需要启用 AI 剧情分析，以生成角色设定和重点场景'}), 400
 
     cover_path = data.get('cover_path', '').strip()
     bgm_path = data.get('bgm_path', '').strip()
@@ -1645,6 +1668,7 @@ def start_process():
         'bgm_volume': float(data.get('bgm_volume', 0.15)),
         'video_engine': data.get('video_engine', '').strip() or DEFAULT_VIDEO_ENGINE,
         'export_prompts': bool(data.get('export_prompts', False)),
+        'export_comfyui': export_comfyui,
         'seedance_api_key': data.get('seedance_api_key', '').strip(),
         'seedance_base_url': data.get('seedance_base_url', '').strip(),
         'seedance_model': data.get('seedance_model', '').strip(),
@@ -1671,6 +1695,7 @@ def get_progress(task_id):
     if not task:
         return jsonify({'error': '任务不存在'}), 404
 
+    comfy_export = (task.get('checkpoint') or {}).get('comfyui_export') or {}
     return jsonify({
         'id': task.get('id'),
         'status': task.get('status'),
@@ -1680,6 +1705,7 @@ def get_progress(task_id):
         'error': task.get('error'),
         'scenes': task.get('scenes', []),
         'has_prompts': bool(task.get('prompts_path')),
+        'has_comfyui': bool(comfy_export.get('archive_path') and os.path.exists(comfy_export['archive_path'])),
         'has_subtitles': bool(task.get('subtitle_path')),
         'decision_stage': task.get('decision_stage'),
         'decision_prompt': task.get('decision_prompt', ''),
@@ -1775,6 +1801,43 @@ def download_prompts(task_id):
     return send_file(prompts_path, as_attachment=True,
                      download_name=f'video_prompts_{task_id}.txt',
                      mimetype='text/plain; charset=utf-8')
+
+
+def _comfyui_export_for_task(task):
+    export = (task.get('checkpoint') or {}).get('comfyui_export') or {}
+    if not isinstance(export, dict):
+        return {}
+    return export
+
+
+@app.route('/api/download_comfyui_workflow/<task_id>')
+@login_required
+def download_comfyui_workflow(task_id):
+    """Download the importable ComfyUI workflow JSON for an owned task."""
+    task = _owned_task(task_id)
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    workflow_path = _comfyui_export_for_task(task).get('workflow_path', '')
+    if not workflow_path or not os.path.isfile(workflow_path):
+        return jsonify({'error': 'ComfyUI 工作流不存在（请在生成前启用 ComfyUI 项目包导出）'}), 404
+    return send_file(workflow_path, as_attachment=True,
+                     download_name=f'comfyui_workflow_{task_id}.json',
+                     mimetype='application/json; charset=utf-8')
+
+
+@app.route('/api/download_comfyui_project/<task_id>')
+@login_required
+def download_comfyui_project(task_id):
+    """Download workflow JSON together with scene and character image assets."""
+    task = _owned_task(task_id)
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    archive_path = _comfyui_export_for_task(task).get('archive_path', '')
+    if not archive_path or not os.path.isfile(archive_path):
+        return jsonify({'error': 'ComfyUI 项目包不存在（请在生成前启用 ComfyUI 项目包导出）'}), 404
+    return send_file(archive_path, as_attachment=True,
+                     download_name=f'comfyui_project_{task_id}.zip',
+                     mimetype='application/zip')
 
 
 @app.route('/api/download_subtitles/<task_id>')

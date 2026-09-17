@@ -127,8 +127,20 @@ The Agnes preset fills text, image, and video defaults. Use 1K and a short page 
 | Video engine | Static full frame, Ken Burns, or configured external engines |
 | AI cover | Generate a cover or upload one; its duration is configurable |
 | Captions | Import SRT text or download generated SRT after completion |
+| ComfyUI project export | Requires AI story analysis; exports selected key scenes, character references, prompts, ComfyUI JSON, and a ZIP package |
 
 The TTS confirmation screen contains one editable narration field per scene. OCR line breaks are removed before TTS so printed layout does not create artificial pauses.
+
+## ComfyUI Project Export
+
+Enable **Export ComfyUI project** before starting a task. This is an optional branch: it does not change the normal PDF-to-video result. When enabled, story analysis also returns a small character bible and marks up to eight key scenes. After scene images are ready, the application creates:
+
+- An importable `comfyui_workflow.json`.
+- A ZIP project package containing that workflow, all scene images, character reference images, `project_manifest.json`, prompts, narration, and an import guide.
+
+ComfyUI workflows reference filenames in ComfyUI's `input/` directory, so binary images are intentionally packaged beside the JSON instead of embedded in it. Install [ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite), copy `assets/scenes/*.png` from the ZIP into `ComfyUI/input/`, drag `comfyui_workflow.json` into the canvas, then queue the prompt. The generated graph uses core `LoadImage`, `ImageScale`, `RepeatImageBatch`, and `ImageBatch` nodes plus `VHS_VideoCombine` to assemble the selected key scenes into an MP4 at their suggested durations.
+
+For AI motion generation, connect the package images and the scene prompts in `project_manifest.json` to the Wan, LTX-Video, HunyuanVideo, or other image-to-video nodes installed in your own ComfyUI environment. Those models have different custom-node and checkpoint requirements, so this application does not assume that any specific video model is installed.
 
 ## OCR Reliability
 
@@ -194,6 +206,7 @@ pdf2video/
 │   ├── ocr_worker.py       Killable OCR worker process
 │   ├── story_analyzer.py   OpenAI-compatible story analysis
 │   ├── image_generator.py  OpenAI/NVIDIA/Agnes image generation
+│   ├── comfyui_export.py    ComfyUI workflow, asset, and project-package export
 │   ├── tts_engine.py       TTS generation
 │   ├── subtitle_builder.py SRT generation
 │   └── video_builder.py    FFmpeg assembly and BGM mixing

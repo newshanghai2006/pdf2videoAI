@@ -16,6 +16,7 @@ let state = {
     pollTimer: null,
     lastSceneCount: 0,
     hasPrompts: false,
+    hasComfyui: false,
     authenticated: false,
     authEmail: '',
     csrfToken: '',
@@ -285,8 +286,9 @@ function renderTasks(tasks) {
             <div class="task-actions">
                 ${canOpen ? `<button class="btn btn-outline" data-task-action="open" data-task-id="${id}">查看</button>` : ''}
                 ${task.status === 'paused' ? `<button class="btn btn-primary" data-task-action="resume" data-task-id="${id}">继续</button>` : ''}
-                ${task.status === 'completed' && task.has_video ? `<button class="btn btn-primary" data-task-action="result" data-task-id="${id}" data-has-prompts="${task.has_prompts ? '1' : '0'}">预览</button><a class="btn btn-outline" href="/api/download/${encodeURIComponent(task.id)}" download>下载</a>` : ''}
+                ${task.status === 'completed' && task.has_video ? `<button class="btn btn-primary" data-task-action="result" data-task-id="${id}" data-has-prompts="${task.has_prompts ? '1' : '0'}" data-has-comfyui="${task.has_comfyui ? '1' : '0'}">预览</button><a class="btn btn-outline" href="/api/download/${encodeURIComponent(task.id)}" download>下载</a>` : ''}
                 ${task.status === 'completed' && task.has_subtitles ? `<a class="btn btn-outline" href="/api/download_subtitles/${encodeURIComponent(task.id)}" download>SRT</a>` : ''}
+                ${task.has_comfyui ? `<a class="btn btn-outline" href="/api/download_comfyui_project/${encodeURIComponent(task.id)}" download>ComfyUI 包</a>` : ''}
                 ${['completed', 'error', 'paused'].includes(task.status) ? `<button class="task-delete" data-task-action="delete" data-task-id="${id}" type="button" title="删除任务" aria-label="删除任务">🗑</button>` : ''}
             </div>
         </article>`;
@@ -303,6 +305,7 @@ async function handleTaskAction(event) {
     if (action === 'result') {
         state.taskId = taskId;
         state.hasPrompts = control.dataset.hasPrompts === '1';
+        state.hasComfyui = control.dataset.hasComfyui === '1';
         closeTasks();
         showResult(taskId);
         return;
@@ -960,9 +963,19 @@ function goToStep(stepNum) {
 // ===== 配置控件 =====
 function setupConfigControls() {
     const aiToggle = document.getElementById('useAiAnalysis');
+    const comfyToggle = document.getElementById('exportComfyui');
     const manualConfig = document.getElementById('manualConfig');
     const syncAnalysisMode = () => { manualConfig.style.display = aiToggle.checked ? 'none' : 'block'; };
-    aiToggle.addEventListener('change', syncAnalysisMode);
+    aiToggle.addEventListener('change', () => {
+        if (!aiToggle.checked) comfyToggle.checked = false;
+        syncAnalysisMode();
+    });
+    comfyToggle.addEventListener('change', () => {
+        if (comfyToggle.checked && !aiToggle.checked) {
+            aiToggle.checked = true;
+            syncAnalysisMode();
+        }
+    });
     syncAnalysisMode();
     // 方向切换
     document.querySelectorAll('#orientationToggle .toggle-btn').forEach(btn => {
@@ -1205,6 +1218,7 @@ async function startProcessing() {
         video_resolution_tier: document.getElementById('videoResolutionTier').value,
         video_frame_rate: parseInt(document.getElementById('videoFrameRate').value) || 24,
         export_prompts: document.getElementById('exportPrompts').checked,
+        export_comfyui: document.getElementById('exportComfyui').checked,
         bgm_path: state.bgmPath,
         bgm_volume: parseInt(document.getElementById('bgmVolume').value) / 100,
     };
@@ -1270,6 +1284,7 @@ async function pollProgress() {
 
         // 提示词就绪标记
         if (data.has_prompts) state.hasPrompts = true;
+        if (data.has_comfyui) state.hasComfyui = true;
 
         // 更新场景画廊
         if (data.scenes && data.scenes.length > state.lastSceneCount) {
@@ -1456,6 +1471,7 @@ function resetProgress() {
     document.querySelector('.progress-container > h2').textContent = '正在生成影片...';
     state.lastSceneCount = 0;
     state.hasPrompts = false;
+    state.hasComfyui = false;
 
     // 重置阶段状态
     document.querySelectorAll('.phase-item').forEach(item => {
@@ -1481,5 +1497,17 @@ function showResult(taskId) {
         promptsBtn.style.display = '';
     } else {
         promptsBtn.style.display = 'none';
+    }
+
+    const workflowBtn = document.getElementById('btnDownloadComfyWorkflow');
+    const projectBtn = document.getElementById('btnDownloadComfyProject');
+    if (state.hasComfyui) {
+        workflowBtn.href = `/api/download_comfyui_workflow/${taskId}`;
+        projectBtn.href = `/api/download_comfyui_project/${taskId}`;
+        workflowBtn.style.display = '';
+        projectBtn.style.display = '';
+    } else {
+        workflowBtn.style.display = 'none';
+        projectBtn.style.display = 'none';
     }
 }

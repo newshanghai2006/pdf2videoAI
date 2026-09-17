@@ -193,7 +193,7 @@ Task metadata and checkpoints are stored in `data/app.db`. Generated pages, OCR 
 
 - **My Tasks** lists the signed-in user's tasks.
 - Completed, failed, and paused tasks can be deleted.
-- **New Task** starts another workflow without logging out.
+- **New Task** starts another workflow without logging out, closes the task dialog, clears the current page state, and returns to PDF upload even if an older cached page is missing an optional control.
 - Pause is cooperative: the current page, model request, TTS clip, or FFmpeg operation completes before a checkpoint is written.
 - After a server restart, interrupted tasks become paused and can resume from persisted checkpoints.
 - The final page provides MP4, SRT, preview, and optional AI-video-prompt downloads.

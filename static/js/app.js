@@ -338,8 +338,17 @@ async function deleteTask(taskId, control) {
 }
 
 function startNewTask() {
+    // Navigate first so a stale/partial DOM cannot leave the tasks dialog stuck open.
+    closeTasks();
+    goToStep(1);
     if (state.pollTimer) clearInterval(state.pollTimer);
+    if (state.decisionTimer) clearTimeout(state.decisionTimer);
+    if (state.decisionCountdownInterval) clearInterval(state.decisionCountdownInterval);
     state.pollTimer = null;
+    state.decisionTimer = null;
+    state.decisionCountdownInterval = null;
+    state.decisionEditing = false;
+    state.decisionSubmitting = false;
     state.taskId = null;
     state.pdfPath = '';
     state.pdfName = '';
@@ -358,9 +367,11 @@ function startNewTask() {
     document.getElementById('coverName').textContent = '';
     document.getElementById('coverMode').value = 'none';
     document.getElementById('coverUploadGroup').style.display = 'none';
-    resetProgress();
-    closeTasks();
-    goToStep(1);
+    try {
+        resetProgress();
+    } catch (error) {
+        console.warn('重置进度界面失败:', error);
+    }
     window.scrollTo({top: 0, behavior: 'smooth'});
 }
 

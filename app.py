@@ -144,6 +144,21 @@ def _is_owned_upload(path):
         return False
 
 
+def _validate_llm_rpm(value, default=20):
+    """Parse an explicit integer RPM without silently accepting out-of-range values."""
+    if value is None or value == '':
+        return default
+    if isinstance(value, bool):
+        raise ValueError('LLM RPM 必须是 1 到 600 之间的整数')
+    try:
+        rpm = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError('LLM RPM 必须是 1 到 600 之间的整数') from error
+    if str(value).strip() != str(rpm) or not 1 <= rpm <= 600:
+        raise ValueError('LLM RPM 必须是 1 到 600 之间的整数')
+    return rpm
+
+
 def _task_output_dir(task_id):
     """Return a task-specific output directory only when it remains under OUTPUT_DIR."""
     root = os.path.realpath(OUTPUT_DIR)
@@ -342,7 +357,8 @@ def _merge_scene_artifacts(scenes, persisted_scenes):
             break
         previous = persisted_scenes[index]
         for key in ('image_path', 'source_image_path', 'image_generation_warning',
-                    'image_prompt_safe', 'audio_path', 'duration'):
+                    'image_prompt_safe', 'audio_path', 'duration', 'narration',
+                    'review_image_replaced', 'review_original_image_path'):
             value = previous.get(key)
             if value not in (None, ''):
                 scene[key] = value
@@ -372,12 +388,14 @@ def wait_for_decision(task_id, stage, error, prompt='', timeout=3600,
         task = _tasks[task_id]
         event = task['decision_event']
         event.clear()
-        confirmation = stage.startswith('TTS')
+        confirmation = stage.startswith('TTS') or stage.startswith('场景图片与解说词')
         task.update(status='waiting_user', decision=None, decision_stage=stage,
                     decision_prompt=prompt,
                     decision_can_retry=bool(allow_retry),
                     error='' if confirmation else str(error),
-                    message='请确认每个场景的伴读文字' if confirmation else f'{stage}失败，请选择继续或退出')
+                    message=('请审核每个场景的图片和解说词' if stage.startswith('场景图片')
+                             else '请确认每个场景的伴读文字')
+                    if confirmation else f'{stage}失败，请选择继续或退出')
         snapshot = task.copy()
     store.save_task(snapshot)
     signaled = event.wait(timeout)
@@ -388,7 +406,7 @@ def wait_for_decision(task_id, stage, error, prompt='', timeout=3600,
         if not signaled and confirmation and task.get('decision') is None:
             task['decision'] = 'continue'
             task['decision_auto'] = True
-            task['message'] = '伴读文本确认等待超时，已自动采用当前文字继续生成配音'
+            task['message'] = '场景审核等待超时，已自动采用当前图片和文字继续处理'
         decision = task.get('decision')
         decision_prompt = task.get('decision_prompt', '')
         if decision == 'pause':
@@ -691,6 +709,7 @@ def run_pipeline(task_id, pdf_path, config):
         bgm_path = config.get('bgm_path', '')
         bgm_volume = config.get('bgm_volume', 0.15)
         llm_model = config.get('llm_model', '')
+        llm_rpm = _validate_llm_rpm(config.get('llm_rpm', 20))
         image_model = config.get('image_model', '')
         image_size_tier = config.get('image_size_tier', '1K')
         video_engine = config.get('video_engine', DEFAULT_VIDEO_ENGINE)
@@ -701,6 +720,7 @@ def run_pipeline(task_id, pdf_path, config):
         cover_duration = max(1.0, float(config.get('cover_duration', 3) or 3))
         first_page_is_cover = bool(config.get('first_page_is_cover', True))
         auto_duration_tts = config.get('auto_duration_tts', True)
+        review_scenes = config.get('review_scenes', True)
 
         width, height = RESOLUTIONS.get(resolution, (1920, 1080))
 
@@ -789,6 +809,7 @@ def run_pipeline(task_id, pdf_path, config):
                             story = analyze_story(
                                 story_ocr_results, art_style=art_style, api_key=api_key,
                                 base_url=base_url, llm_model=llm_model or None,
+                                llm_rpm=llm_rpm,
                                 progress_callback=lambda c, t, m: _pipeline_progress(
                                     task_id, progress=28 + int(c / (t or 1) * 7), message=m),
                                 include_comfy_assets=export_comfyui,
@@ -846,6 +867,11 @@ def run_pipeline(task_id, pdf_path, config):
             _write_json_atomic(story_checkpoint_path, story)
             checkpoint['analyze'] = True
             _set_checkpoint(task_id, 'analyze')
+        # Fresh analyses and restored checkpoints use the same deterministic
+        # character anchors before any image, cover, video or export prompt.
+        from core.prompt_optimizer import apply_character_identity_locks
+        apply_character_identity_locks(story)
+        scenes = story.get('scenes', scenes)
         update_task(task_id, scenes=scenes, progress=36,
                     message=f'剧情分析完成，共{len(scenes)}个场景')
 
@@ -969,6 +995,10 @@ def run_pipeline(task_id, pdf_path, config):
         # ===== 可选片头封面 =====
         if cover_mode in ('ai', 'upload'):
             cover_image = cover_path
+            reviewed_cover = next((item for item in persisted_scenes
+                                   if item.get('is_cover')
+                                   and item.get('review_image_replaced')
+                                   and os.path.exists(item.get('image_path', ''))), None)
             if cover_mode == 'ai':
                 from core.image_generator import generate_scene_image
                 cover_image = os.path.join(work_dir, 'cover.png')
@@ -978,6 +1008,15 @@ def run_pipeline(task_id, pdf_path, config):
                     *[str(item.get('image_prompt') or '').strip()
                       for item in scenes[:3]],
                 ]))[:3000]
+                from core.prompt_optimizer import build_character_identity_lock
+                cover_characters = []
+                for item in scenes[:3]:
+                    for name in item.get('characters_present') or []:
+                        if name not in cover_characters:
+                            cover_characters.append(name)
+                cover_character_lock = build_character_identity_lock(
+                    story.get('character_bible', []), cover_characters,
+                    max_characters=4)
                 cover_prompt = (
                     "A striking cinematic cover image for a Chinese comic video, "
                     "high visual impact, dramatic lighting, clear central characters, bold composition, "
@@ -985,6 +1024,8 @@ def run_pipeline(task_id, pdf_path, config):
                     "Preserve the source story's exact year or period, countries, locations, character "
                     "nationalities, clothing or military uniforms, equipment and architecture. Never "
                     "convert a modern or twentieth-century story into an ancient costume drama. "
+                    f"{cover_character_lock} Use the exact same faces, ages, hairstyles, body builds, "
+                    "signature costume colors, insignia and accessories as the story scenes. "
                     f"Source story context: {cover_context}. "
                     "clean poster composition with intentional empty space for a title to be added later. "
                     "Do not generate any readable text, letters, logos, captions or symbols. "
@@ -1005,10 +1046,13 @@ def run_pipeline(task_id, pdf_path, config):
                         update_task(task_id, message='AI 封面被内容过滤，已跳过封面并继续正文视频')
                     else:
                         raise
+            if checkpoint.get('review') and reviewed_cover:
+                cover_image = reviewed_cover['image_path']
             if cover_image and os.path.exists(cover_image):
                 scenes.insert(0, {'scene_number': 0, 'page_source': 0,
                                   'narration': '', 'dialogue': [], 'duration': cover_duration,
-                                  'image_path': cover_image, 'is_cover': True})
+                                  'image_path': cover_image, 'is_cover': True,
+                                  'review_image_replaced': bool(reviewed_cover)})
                 update_task(task_id, scenes=scenes, message='片头封面已加入影片')
             else:
                 update_task(
@@ -1024,6 +1068,47 @@ def run_pipeline(task_id, pdf_path, config):
         _write_json_atomic(visual_checkpoint_path, scenes)
         checkpoint['generate'] = True
         _set_checkpoint(task_id, 'generate')
+
+        # ===== 画面与解说词审核 =====
+        # 上传替换接口会更新运行中任务的 image_path；用户确认后同步回本地场景，
+        # 后续 TTS、ComfyUI 导出和视频合成都使用审核后的内容。
+        if review_scenes and not checkpoint.get('review'):
+            review_prompt = '\n'.join(str(scene.get('narration') or '') for scene in scenes)
+            confirmed_text = wait_for_decision(
+                task_id, '场景图片与解说词确认',
+                '请审核每个场景的图片和解说词，可上传图片替换当前画面。',
+                prompt=review_prompt, timeout=3600,
+            )
+            _apply_confirmed_narrations(scenes, confirmed_text)
+            runtime_scenes = get_task(task_id).get('scenes') or []
+            for index, scene in enumerate(scenes):
+                if index >= len(runtime_scenes):
+                    break
+                replacement = runtime_scenes[index].get('image_path')
+                if replacement and os.path.exists(replacement):
+                    scene['image_path'] = replacement
+                if runtime_scenes[index].get('review_image_replaced'):
+                    scene['review_image_replaced'] = True
+            update_task(task_id, scenes=scenes, progress=74,
+                        message='图片与解说词审核完成')
+            _write_json_atomic(visual_checkpoint_path, scenes)
+            checkpoint['review'] = True
+            _set_checkpoint(task_id, 'review')
+            if export_prompts:
+                try:
+                    from core.video_prompt import build_prompts_document
+                    reviewed_document = build_prompts_document(
+                        scenes,
+                        title=story.get('title', ''),
+                        art_style_desc=ART_STYLES.get(art_style, ''),
+                        engine_hint='火山 Seedance / 即梦 / 可灵 / Runway 等',
+                    )
+                    reviewed_prompts_path = os.path.join(work_dir, 'video_prompts.txt')
+                    with open(reviewed_prompts_path, 'w', encoding='utf-8') as handle:
+                        handle.write(reviewed_document)
+                    update_task(task_id, prompts_path=reviewed_prompts_path)
+                except Exception as prompt_error:
+                    update_task(task_id, message=f'审核后的提示词导出跳过: {prompt_error}')
 
         # ===== Optional ComfyUI export =====
         # This is deliberately separate from the rendering pipeline: it only
@@ -1053,12 +1138,13 @@ def run_pipeline(task_id, pdf_path, config):
                         message='已从检查点复用 TTS 配音')
         elif use_tts:
             from core.tts_engine import generate_scene_narrations
-            narration_prompt = '\n'.join(str(scene.get('narration') or '') for scene in scenes)
-            confirmed_text = wait_for_decision(
-                task_id, 'TTS 伴读文本确认', '请检查并确认每个场景的伴读文字',
-                prompt=narration_prompt, timeout=180
-            )
-            _apply_confirmed_narrations(scenes, confirmed_text)
+            if not review_scenes:
+                narration_prompt = '\n'.join(str(scene.get('narration') or '') for scene in scenes)
+                confirmed_text = wait_for_decision(
+                    task_id, 'TTS 伴读文本确认', '请检查并确认每个场景的伴读文字',
+                    prompt=narration_prompt, timeout=180
+                )
+                _apply_confirmed_narrations(scenes, confirmed_text)
             update_task(task_id, phase='tts', progress=75,
                         message='正在生成旁白配音...')
             audio_dir = os.path.join(work_dir, 'audio')
@@ -1462,6 +1548,10 @@ def test_connection():
     else:
         image_api_key = IMAGE_API_KEY or api_key
     llm_model = data.get('llm_model', '').strip() or LLM_MODEL
+    try:
+        llm_rpm = _validate_llm_rpm(data.get('llm_rpm', 20))
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 400
     image_model = data.get('image_model', '').strip() or IMAGE_MODEL
     image_size_tier = data.get('image_size_tier', '1K').strip().upper()
     use_image_generation = bool(data.get('use_image_generation', False))
@@ -1480,10 +1570,11 @@ def test_connection():
         reply = _chat(
             client, llm_model,
             messages=[{"role": "user", "content": "请用一句话回复：连接正常。"}],
-            temperature=0.3, max_tokens=20,
+            temperature=0.3, max_tokens=20, llm_rpm=llm_rpm,
         )
         reply = reply.strip()
-        result['llm'] = {'ok': True, 'model': llm_model, 'reply': reply}
+        result['llm'] = {'ok': True, 'model': llm_model, 'reply': reply,
+                         'rpm': llm_rpm}
       except Exception as e:
         result['llm'] = {'ok': False, 'model': llm_model, 'error': str(e)}
 
@@ -1614,6 +1705,10 @@ def start_process():
         return jsonify({'error': 'PDF文件不存在'}), 400
 
     api_key = data.get('llm_api_key', '').strip() or data.get('api_key', '').strip()
+    try:
+        llm_rpm = _validate_llm_rpm(data.get('llm_rpm', 20))
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 400
     use_ai_analysis = bool(data.get('use_ai_analysis', True))
     export_comfyui = bool(data.get('export_comfyui', False))
     if use_ai_analysis and not api_key:
@@ -1636,6 +1731,7 @@ def start_process():
         'image_api_key': data.get('image_api_key', '').strip(),
         'image_base_url': data.get('image_base_url', '').strip(),
         'llm_model': data.get('llm_model', '').strip(),
+        'llm_rpm': llm_rpm,
         'image_model': data.get('image_model', '').strip(),
         'image_size_tier': data.get('image_size_tier', '1K').strip().upper(),
         'use_image_generation': bool(data.get('use_image_generation', False)),
@@ -1660,6 +1756,7 @@ def start_process():
         'cover_duration': float(data.get('cover_duration', 3) or 3),
         'first_page_is_cover': bool(data.get('first_page_is_cover', True)),
         'auto_duration_tts': bool(data.get('auto_duration_tts', True)),
+        'review_scenes': bool(data.get('review_scenes', True)),
         'use_tts': data.get('use_tts', True),
         'tts_voice': data.get('tts_voice', 'zh-CN-YunxiNeural'),
         'dialogue_voice': data.get('dialogue_voice', '').strip() or DEFAULT_DIALOGUE_VOICE,
@@ -1753,6 +1850,69 @@ def get_scene_image(task_id, scene_idx):
         return jsonify({'error': '图片不存在'}), 404
 
     return send_file(image_path, mimetype='image/png')
+
+
+@app.route('/api/tasks/<task_id>/scenes/<int:scene_idx>/image', methods=['POST'])
+@login_required
+@csrf_required
+def replace_scene_image(task_id, scene_idx):
+    """Replace one reviewed scene image with a normalized user upload."""
+    task = _owned_task(task_id)
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    if (task.get('status') != 'waiting_user'
+            or not str(task.get('decision_stage') or '').startswith('场景图片与解说词')):
+        return jsonify({'error': '只有在图片与解说词审核阶段才能替换图片'}), 409
+    scenes = task.get('scenes') or []
+    if scene_idx < 0 or scene_idx >= len(scenes):
+        return jsonify({'error': '场景不存在'}), 404
+    upload = request.files.get('file')
+    if not upload or not upload.filename:
+        return jsonify({'error': '请选择图片文件'}), 400
+    if not upload.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+        return jsonify({'error': '替换图片仅支持 PNG、JPG、JPEG 或 WEBP'}), 400
+
+    review_dir = os.path.join(_task_output_dir(task_id), 'review_overrides')
+    os.makedirs(review_dir, exist_ok=True)
+    destination = os.path.join(review_dir, f'scene_{scene_idx + 1:04d}.png')
+    temporary = destination + f'.{uuid.uuid4().hex[:8]}.tmp'
+    try:
+        with Image.open(upload.stream) as source:
+            if source.width < 16 or source.height < 16:
+                raise ValueError('图片尺寸过小')
+            if source.width * source.height > 40_000_000:
+                raise ValueError('图片像素过大，请使用不超过 4000 万像素的图片')
+            source.load()
+            rgba = source.convert('RGBA')
+        background = Image.new('RGBA', rgba.size, (255, 255, 255, 255))
+        normalized = Image.alpha_composite(background, rgba).convert('RGB')
+        normalized.save(temporary, format='PNG', optimize=True)
+        os.replace(temporary, destination)
+    except Exception as error:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        return jsonify({'error': f'替换图片无法读取: {error}'}), 400
+
+    snapshot = None
+    with _tasks_lock:
+        runtime = _tasks.get(task_id)
+        if (not runtime or runtime.get('status') != 'waiting_user'
+                or scene_idx >= len(runtime.get('scenes') or [])):
+            return jsonify({'error': '审核阶段已经结束，请重新打开任务'}), 409
+        scene = runtime['scenes'][scene_idx]
+        scene.setdefault('review_original_image_path', scene.get('image_path', ''))
+        scene['image_path'] = destination
+        scene['review_image_replaced'] = True
+        snapshot = runtime.copy()
+    store.save_task(snapshot)
+    return jsonify({
+        'ok': True,
+        'scene_index': scene_idx,
+        'image_url': url_for('get_scene_image', task_id=task_id,
+                             scene_idx=scene_idx, v=uuid.uuid4().hex[:8]),
+    })
 
 
 @app.route('/api/download/<task_id>')

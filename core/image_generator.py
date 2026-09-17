@@ -248,7 +248,9 @@ def _safe_period_prompt(prompt):
         safe[:1800]
         + " Family-friendly period-accurate illustration, non-graphic, no blood, "
           "no visible injury, no dead bodies, no explicit violence. Preserve the era, "
-          "countries, character nationalities, uniforms, location, composition and "
+          "countries, character nationalities, uniforms, location, composition and every "
+          "CHARACTER IDENTITY LOCK. Keep the same face, age, hairstyle, body build, clothing "
+          "colors and accessories across scenes. "
           "dramatic storytelling atmosphere. Never replace a modern event with an ancient scene."
     )
 
@@ -675,9 +677,13 @@ def colorize_page(image_path, output_path, api_key=None, base_url=None,
     model = image_model or IMAGE_MODEL
     prompt = (
         "Colorize this black-and-white Chinese gongbi illustration. "
-        "Preserve every original line, character, face, costume, speech bubble, "
-        "composition and historical detail exactly. Add tasteful natural colors "
-        f"in a {style} style. Do not redraw, crop, add, remove, blur or change any text."
+        "This is restoration and colorization, not a redesign. Preserve every original line, "
+        "person's identity, facial geometry, apparent age, expression, hairstyle, body shape, "
+        "costume cut, insignia, accessory, prop, speech bubble, composition and historical detail "
+        "exactly. Use restrained, historically plausible skin, fabric, architecture and landscape "
+        f"colors in a {style} style. Keep recurring uniforms and costumes in a stable palette. "
+        "Do not redraw, beautify, replace faces, change ethnicity, crop, add, remove, blur or alter "
+        "any text. No new text, logos, symbols or watermarks."
     )
     resolved_key = (api_key or OPENAI_API_KEY or "").strip()
     resolved_url = (base_url or OPENAI_BASE_URL or "").strip()

@@ -12,6 +12,7 @@ let state = {
     decisionSeconds: 60,
     decisionEditing: false,
     decisionSubmitting: false,
+    pendingSceneUploads: 0,
     taskId: null,
     pollTimer: null,
     lastSceneCount: 0,
@@ -456,6 +457,10 @@ function setupCoverUpload() {
 async function submitDecision(decision) {
     if (!state.taskId) return;
     if (state.decisionSubmitting) return;
+    if (state.pendingSceneUploads > 0) {
+        alert('图片仍在上传，请等待上传完成后再确认。');
+        return;
+    }
     state.decisionSubmitting = true;
     if (state.decisionTimer) {
         clearTimeout(state.decisionTimer);
@@ -486,6 +491,45 @@ async function submitDecision(decision) {
     }
 }
 
+function stopDecisionCountdown(message = '已开始编辑，倒计时已停止。修改完成后请点击确认。') {
+    state.decisionEditing = true;
+    if (state.decisionTimer) {
+        clearTimeout(state.decisionTimer);
+        state.decisionTimer = null;
+    }
+    if (state.decisionCountdownInterval) {
+        clearInterval(state.decisionCountdownInterval);
+        state.decisionCountdownInterval = null;
+    }
+    document.getElementById('decisionMsg').textContent = message;
+}
+
+async function uploadSceneReplacement(sceneIndex, input, image, status) {
+    if (!input.files.length || !state.taskId) return;
+    stopDecisionCountdown('正在上传替换图片，倒计时已停止。');
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    state.pendingSceneUploads += 1;
+    status.classList.remove('error');
+    status.textContent = '上传中...';
+    try {
+        const response = await apiFetch(
+            `/api/tasks/${encodeURIComponent(state.taskId)}/scenes/${sceneIndex}/image`,
+            {method: 'POST', body: form},
+        );
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '替换图片上传失败');
+        image.src = `${data.image_url}${data.image_url.includes('?') ? '&' : '?'}t=${Date.now()}`;
+        status.textContent = `已替换：${input.files[0].name}`;
+    } catch (error) {
+        status.classList.add('error');
+        status.textContent = error.message;
+    } finally {
+        state.pendingSceneUploads = Math.max(0, state.pendingSceneUploads - 1);
+        input.value = '';
+    }
+}
+
 function collectDecisionPrompt() {
     const fields = document.querySelectorAll('.decision-scene-prompt');
     if (fields.length) return JSON.stringify(Array.from(fields).map(field => ({
@@ -496,7 +540,7 @@ function collectDecisionPrompt() {
 }
 
 const savedSettingFields = [
-    'llmApiKey', 'llmBaseUrl', 'llmModel',
+    'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmRpm',
     'imageApiKey', 'imageBaseUrl', 'imageModel',
     'videoApiKey', 'videoBaseUrl', 'videoModel',
 ];
@@ -1068,6 +1112,12 @@ async function runTestConnection() {
     const btn = document.getElementById('btnTestConn');
     const resultEl = document.getElementById('testResult');
     const apiKey = document.getElementById('llmApiKey').value.trim();
+    const llmRpm = Number(document.getElementById('llmRpm').value);
+
+    if (!Number.isInteger(llmRpm) || llmRpm < 1 || llmRpm > 600) {
+        alert('LLM RPM 必须是 1 到 600 之间的整数');
+        return;
+    }
 
     if (document.getElementById('useAiAnalysis').checked && !apiKey) {
         alert('请先填写 API Key');
@@ -1091,6 +1141,7 @@ async function runTestConnection() {
         use_image_generation: document.getElementById('useImageGeneration').checked,
         colorize_pages: document.getElementById('colorizePages').checked,
         llm_model: document.getElementById('llmModel').value.trim(),
+        llm_rpm: llmRpm,
         image_model: document.getElementById('imageModel').value.trim(),
         image_size_tier: document.getElementById('imageSizeTier').value,
         use_ai_analysis: document.getElementById('useAiAnalysis').checked,
@@ -1112,7 +1163,7 @@ async function runTestConnection() {
 
         // LLM 结果
         if (data.llm && data.llm.ok) {
-            html += `<div class="test-ok">✅ LLM 模型 <b>${escapeHtml(data.llm.model)}</b> 可用<br><span class="test-reply">回复: ${escapeHtml(data.llm.reply)}</span></div>`;
+            html += `<div class="test-ok">✅ LLM 模型 <b>${escapeHtml(data.llm.model)}</b> 可用<br><span class="test-reply">回复: ${escapeHtml(data.llm.reply)}${data.llm.rpm ? `（限速 ${escapeHtml(data.llm.rpm)} RPM）` : ''}</span></div>`;
         } else if (data.llm) {
             html += `<div class="test-err">❌ LLM 模型 <b>${escapeHtml(data.llm.model)}</b> 失败<br><span class="test-reply">${escapeHtml(data.llm.error)}</span></div>`;
         }
@@ -1163,6 +1214,11 @@ function setupProcessButton() {
 
 async function startProcessing() {
     const apiKey = document.getElementById('llmApiKey').value.trim();
+    const llmRpm = Number(document.getElementById('llmRpm').value);
+    if (!Number.isInteger(llmRpm) || llmRpm < 1 || llmRpm > 600) {
+        alert('LLM RPM 必须是 1 到 600 之间的整数');
+        return;
+    }
     if (document.getElementById('useAiAnalysis').checked && !apiKey) {
         alert('请填写 LLM API Key');
         return;
@@ -1189,6 +1245,7 @@ async function startProcessing() {
         use_image_generation: document.getElementById('useImageGeneration').checked,
         colorize_pages: document.getElementById('colorizePages').checked,
         llm_model: document.getElementById('llmModel').value.trim(),
+        llm_rpm: llmRpm,
         image_model: document.getElementById('imageModel').value.trim(),
         image_size_tier: document.getElementById('imageSizeTier').value,
         art_style: artStyle,
@@ -1207,6 +1264,7 @@ async function startProcessing() {
         cover_path: state.coverPath || '',
         cover_duration: parseFloat(document.getElementById('coverDuration').value) || 3,
         first_page_is_cover: document.getElementById('firstPageIsCover').checked,
+        review_scenes: document.getElementById('reviewScenes').checked,
         use_tts: document.getElementById('useTts').checked,
         auto_duration_tts: document.getElementById('autoDurationTts').checked,
         tts_voice: document.getElementById('ttsVoice').value,
@@ -1296,67 +1354,85 @@ async function pollProgress() {
         if (data.status === 'waiting_user') {
             const box = document.getElementById('decisionBox');
             box.style.display = 'block';
-            const isTtsConfirmation = (data.decision_stage || '').includes('TTS');
+            const decisionStage = data.decision_stage || '';
+            const isTtsConfirmation = decisionStage.includes('TTS');
+            const isSceneReview = decisionStage.includes('图片与解说词确认');
+            const isConfirmation = isTtsConfirmation || isSceneReview;
             const retryButton = document.getElementById('btnRetryAi');
-            retryButton.style.display = (!isTtsConfirmation && data.decision_can_retry)
+            retryButton.style.display = (!isConfirmation && data.decision_can_retry)
                 ? 'inline-flex' : 'none';
-            document.getElementById('decisionTitle').textContent = isTtsConfirmation
-                ? '请确认伴读文字' : `${data.decision_stage || 'AI 处理'}失败`;
-            document.getElementById('decisionMsg').textContent = isTtsConfirmation
-                ? '请检查每个场景下方的文字，修改后确认；60 秒后将自动继续。'
+            document.getElementById('decisionTitle').textContent = isSceneReview
+                ? '审核图片和解说词'
+                : (isTtsConfirmation ? '请确认伴读文字' : `${decisionStage || 'AI 处理'}失败`);
+            document.getElementById('decisionMsg').textContent = isConfirmation
+                ? `请检查每个场景下方的${isSceneReview ? '图片和解说词' : '文字'}，修改后确认；60 秒后将自动继续。`
                 : (data.error || data.message);
             const promptBox = document.getElementById('decisionPrompt');
             const sceneEditor = document.getElementById('decisionScenes');
-            const promptMode = (data.decision_stage || '').includes('提示词');
-            const ttsMode = (data.decision_stage || '').includes('TTS');
-            promptBox.style.display = (promptMode || ttsMode) ? 'block' : 'none';
+            const promptMode = decisionStage.includes('提示词');
+            const sceneMode = isTtsConfirmation || isSceneReview;
+            promptBox.style.display = promptMode ? 'block' : 'none';
             // 轮询每秒执行一次；用户获得焦点后不能再用服务端旧值覆盖正在编辑的内容。
             if (document.activeElement !== promptBox) {
-            promptBox.value = data.decision_prompt || '';
-            if (ttsMode) {
-                promptBox.style.display = 'none';
-                sceneEditor.style.display = 'grid';
-                if (!sceneEditor.children.length || sceneEditor.dataset.taskId !== state.taskId) {
-                    sceneEditor.dataset.taskId = state.taskId;
-                    state.decisionEditing = false;
-                    sceneEditor.innerHTML = (data.scenes || []).map((scene, index) => `
-                        <div class="decision-scene-item">
-                            <div class="decision-scene-title">${scene.is_cover
-                                ? '片头封面（无旁白）'
-                                : scene.is_pdf_cover
-                                    ? `PDF 封面（第 ${escapeHtml(scene.page_source)} 页，无旁白）`
-                                : `场景 ${escapeHtml(scene.scene_number || index + 1)}（PDF 第 ${escapeHtml((scene.page_sources || [scene.page_source]).join(','))} 页）`}</div>
-                            <img class="decision-scene-image" src="/api/scene_image/${state.taskId}/${index}" alt="场景 ${index + 1}">
-                            <textarea class="input decision-scene-prompt" data-scene-index="${index}" rows="4"
-                                ${(scene.is_cover || scene.is_pdf_cover) ? 'disabled aria-label="封面无旁白"' : ''}>${escapeHtml((scene.is_cover || scene.is_pdf_cover) ? '' : (scene.narration || ''))}</textarea>
-                        </div>`).join('');
-                    sceneEditor.querySelectorAll('.decision-scene-prompt').forEach(field => {
-                        const stopCountdown = () => {
-                            state.decisionEditing = true;
-                            if (state.decisionTimer) { clearTimeout(state.decisionTimer); state.decisionTimer = null; }
-                            if (state.decisionCountdownInterval) { clearInterval(state.decisionCountdownInterval); state.decisionCountdownInterval = null; }
-                            document.getElementById('decisionMsg').textContent = '已开始编辑，倒计时已停止。修改完成后请点击确认。';
-                            document.getElementById('btnContinueWithoutAi').textContent = '确认文本并生成配音';
-                        };
-                        field.addEventListener('focus', stopCountdown);
-                        field.addEventListener('input', stopCountdown);
-                    });
+                promptBox.value = data.decision_prompt || '';
+                if (sceneMode) {
+                    sceneEditor.style.display = 'grid';
+                    if (!sceneEditor.children.length
+                            || sceneEditor.dataset.taskId !== state.taskId
+                            || sceneEditor.dataset.stage !== decisionStage) {
+                        sceneEditor.dataset.taskId = state.taskId;
+                        sceneEditor.dataset.stage = decisionStage;
+                        state.decisionEditing = false;
+                        sceneEditor.innerHTML = (data.scenes || []).map((scene, index) => `
+                            <div class="decision-scene-item">
+                                <div class="decision-scene-title">${scene.is_cover
+                                    ? '片头封面（无旁白）'
+                                    : scene.is_pdf_cover
+                                        ? `PDF 封面（第 ${escapeHtml(scene.page_source)} 页，无旁白）`
+                                    : `场景 ${escapeHtml(scene.scene_number || index + 1)}（PDF 第 ${escapeHtml((scene.page_sources || [scene.page_source]).join(','))} 页）`}</div>
+                                <img class="decision-scene-image" src="/api/scene_image/${state.taskId}/${index}" alt="场景 ${index + 1}">
+                                ${isSceneReview ? `<div class="decision-scene-image-actions">
+                                    <input class="decision-scene-image-input" type="file" accept="image/png,image/jpeg,image/webp" data-scene-index="${index}" hidden>
+                                    <button class="btn btn-outline btn-compact decision-scene-image-button" type="button">上传替换图片</button>
+                                    <span class="decision-scene-upload-status">${scene.review_image_replaced ? '已使用上传的替换图片' : ''}</span>
+                                </div>` : ''}
+                                <textarea class="input decision-scene-prompt" data-scene-index="${index}" rows="4"
+                                    ${(scene.is_cover || scene.is_pdf_cover) ? 'disabled aria-label="封面无旁白"' : ''}>${escapeHtml((scene.is_cover || scene.is_pdf_cover) ? '' : (scene.narration || ''))}</textarea>
+                            </div>`).join('');
+                        sceneEditor.querySelectorAll('.decision-scene-prompt').forEach(field => {
+                            field.addEventListener('focus', () => stopDecisionCountdown());
+                            field.addEventListener('input', () => stopDecisionCountdown());
+                        });
+                        sceneEditor.querySelectorAll('.decision-scene-image-button').forEach(button => {
+                            const item = button.closest('.decision-scene-item');
+                            const input = item.querySelector('.decision-scene-image-input');
+                            const image = item.querySelector('.decision-scene-image');
+                            const status = item.querySelector('.decision-scene-upload-status');
+                            button.addEventListener('click', () => {
+                                stopDecisionCountdown('请选择替换图片；倒计时已停止。');
+                                input.click();
+                            });
+                            input.addEventListener('change', () => uploadSceneReplacement(
+                                Number(input.dataset.sceneIndex), input, image, status));
+                        });
+                    }
+                } else {
+                    sceneEditor.style.display = 'none';
+                    sceneEditor.innerHTML = '';
                 }
-            } else {
-                sceneEditor.style.display = 'none';
-                sceneEditor.innerHTML = '';
             }
-            }
-            document.getElementById('btnContinueWithoutAi').textContent = promptMode ? '修改后重新提交' : (ttsMode ? '确认文本并生成配音' : '无 AI 继续');
-            if (ttsMode && !state.decisionTimer
+            const confirmLabel = isSceneReview ? '确认图片和解说词并继续' : '确认文本并生成配音';
+            document.getElementById('btnContinueWithoutAi').textContent = promptMode
+                ? '修改后重新提交' : (sceneMode ? confirmLabel : '无 AI 继续');
+            if (sceneMode && !state.decisionTimer
                     && !state.decisionEditing && !state.decisionSubmitting) {
                 state.decisionSeconds = 60;
                 state.decisionTimer = setTimeout(() => submitDecision('continue'), 60000);
                 state.decisionCountdownInterval = setInterval(() => {
                     state.decisionSeconds = Math.max(0, state.decisionSeconds - 1);
-                    const countdownText = `请检查每个场景下方的文字，修改后确认；${state.decisionSeconds} 秒后将自动继续。`;
+                    const countdownText = `请检查每个场景下方的${isSceneReview ? '图片和解说词' : '文字'}，修改后确认；${state.decisionSeconds} 秒后将自动继续。`;
                     document.getElementById('decisionMsg').textContent = countdownText;
-                    document.getElementById('btnContinueWithoutAi').textContent = `确认文本并生成配音（${state.decisionSeconds}秒）`;
+                    document.getElementById('btnContinueWithoutAi').textContent = `${confirmLabel}（${state.decisionSeconds}秒）`;
                 }, 1000);
             }
         } else if (data.status === 'paused') {
@@ -1472,6 +1548,7 @@ function resetProgress() {
     state.lastSceneCount = 0;
     state.hasPrompts = false;
     state.hasComfyui = false;
+    state.pendingSceneUploads = 0;
 
     // 重置阶段状态
     document.querySelectorAll('.phase-item').forEach(item => {

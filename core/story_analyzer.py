@@ -7,9 +7,13 @@ from openai import APIStatusError, BadRequestError, OpenAI
 import httpx
 
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL, ART_STYLES
-from .prompt_optimizer import optimize_chinese_visual_prompt
+from .prompt_optimizer import (
+    apply_character_identity_locks,
+    optimize_chinese_visual_prompt,
+)
 from .rate_limiter import (
     agnes_text_limiter,
+    get_llm_rate_limiter,
     get_sensenova_llm_limiter,
     nvidia_limiter,
 )
@@ -17,6 +21,28 @@ from .rate_limiter import (
 
 class StoryJSONError(RuntimeError):
     """LLM returned a scene response that cannot be decoded as complete JSON."""
+
+
+def _merge_character_bibles(*collections):
+    """Merge character profiles by canonical name while preserving established traits."""
+    merged = []
+    for collection in collections:
+        for character in collection or []:
+            if not isinstance(character, dict):
+                continue
+            name = str(character.get('name') or '').strip()
+            if not name:
+                continue
+            existing = next((item for item in merged
+                             if str(item.get('name') or '').strip().casefold()
+                             == name.casefold()), None)
+            if existing:
+                for key, value in character.items():
+                    if value and not existing.get(key):
+                        existing[key] = value
+            else:
+                merged.append(dict(character))
+    return merged[:8]
 
 
 def _detect_document_period_context(ocr_results):
@@ -66,6 +92,8 @@ def get_client(api_key=None, base_url=None):
     client._pdf2video_is_nvidia = is_nvidia
     client._pdf2video_is_agnes = is_agnes
     client._pdf2video_is_sensenova = is_sensenova
+    client._pdf2video_rate_base_url = url
+    client._pdf2video_rate_api_key = key
     return client
 
 
@@ -96,7 +124,7 @@ def _collect_stream(stream):
 
 
 def _chat(client, model, messages, temperature=0.7, json_mode=False,
-          max_tokens=4096):
+          max_tokens=4096, llm_rpm=None):
     """稳健的 chat.completions 调用。
 
     兼容不同模型家族：
@@ -114,14 +142,27 @@ def _chat(client, model, messages, temperature=0.7, json_mode=False,
         kwargs["response_format"] = {"type": "json_object"}
 
     def create():
-        if getattr(client, "_pdf2video_is_nvidia", False):
-            nvidia_limiter.wait()
-        if getattr(client, "_pdf2video_is_agnes", False):
-            agnes_text_limiter.wait()
-        sensenova_limiter = get_sensenova_llm_limiter(
-            model, getattr(client, "_pdf2video_is_sensenova", False))
-        if sensenova_limiter:
-            sensenova_limiter.wait()
+        custom_limiter = None
+        if llm_rpm is not None:
+            custom_limiter = get_llm_rate_limiter(
+                llm_rpm,
+                getattr(client, "_pdf2video_rate_base_url", ""),
+                getattr(client, "_pdf2video_rate_api_key", ""),
+                model,
+            )
+        sensenova_limiter = None
+        active_limiter = custom_limiter
+        if active_limiter is None:
+            if getattr(client, "_pdf2video_is_nvidia", False):
+                active_limiter = nvidia_limiter
+            elif getattr(client, "_pdf2video_is_agnes", False):
+                active_limiter = agnes_text_limiter
+            else:
+                sensenova_limiter = get_sensenova_llm_limiter(
+                    model, getattr(client, "_pdf2video_is_sensenova", False))
+                active_limiter = sensenova_limiter
+        if active_limiter:
+            active_limiter.wait()
         try:
             return _collect_stream(client.chat.completions.create(**kwargs))
         except APIStatusError as error:
@@ -130,20 +171,23 @@ def _chat(client, model, messages, temperature=0.7, json_mode=False,
             if (getattr(client, "_pdf2video_is_agnes", False)
                     and error.status_code in (429, 503)):
                 time.sleep(60 if error.status_code == 429 else 5)
-                agnes_text_limiter.wait()
+                (custom_limiter or agnes_text_limiter).wait()
                 return _collect_stream(client.chat.completions.create(**kwargs))
-            if sensenova_limiter and error.status_code in (429, 503):
+            if ((custom_limiter or sensenova_limiter)
+                    and getattr(client, "_pdf2video_is_sensenova", False)
+                    and error.status_code in (429, 503)):
                 retry_after = None
                 try:
                     retry_after = float(error.response.headers.get("retry-after", ""))
                 except (AttributeError, TypeError, ValueError):
                     pass
                 wait_seconds = retry_after if retry_after is not None else (
-                    sensenova_limiter.interval if error.status_code == 429 else 5
+                    (custom_limiter or sensenova_limiter).interval
+                    if error.status_code == 429 else 5
                 )
                 # 不在后台无提示地等待数小时；长窗口耗尽时交给“重试”按钮决定。
                 time.sleep(min(300, max(1, wait_seconds)))
-                sensenova_limiter.wait()
+                (custom_limiter or sensenova_limiter).wait()
                 return _collect_stream(client.chat.completions.create(**kwargs))
             raise
 
@@ -250,7 +294,8 @@ def _normalize_batch_page_sources(scenes, batch_pages, empty_pages=None):
 
 def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=None,
                   llm_model=None, progress_callback=None, _direct_request=False,
-                  _document_period_context=None, include_comfy_assets=False):
+                  _document_period_context=None, include_comfy_assets=False,
+                  _known_character_bible=None, llm_rpm=20):
     """用 LLM 分析 OCR 文字，拆分为场景并生成画面提示词。
 
     Args:
@@ -282,9 +327,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
     if not _direct_request:
         batches = [ocr_results[i:i + batch_size]
                    for i in range(0, len(ocr_results), batch_size)]
-        merged = {'title': '', 'summary': '', 'characters': [], 'scenes': []}
-        if include_comfy_assets:
-            merged['character_bible'] = []
+        merged = {'title': '', 'summary': '', 'characters': [],
+                  'character_bible': [], 'scenes': []}
         summaries = []
 
         def analyze_batch(batch, batch_number, single_page_retry=True):
@@ -296,6 +340,8 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                     _direct_request=True,
                     _document_period_context=_document_period_context,
                     include_comfy_assets=include_comfy_assets,
+                    _known_character_bible=merged['character_bible'],
+                    llm_rpm=llm_rpm,
                 )
                 return [(batch, part)]
             except StoryJSONError as error:
@@ -346,13 +392,12 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                 for character in part.get('characters', []):
                     if character not in merged['characters']:
                         merged['characters'].append(character)
-                if include_comfy_assets:
-                    for character in part.get('character_bible', []):
-                        if character not in merged['character_bible']:
-                            merged['character_bible'].append(character)
+                merged['character_bible'] = _merge_character_bibles(
+                    merged['character_bible'], part.get('character_bible', []))
                 merged['scenes'].extend(part.get('scenes', []))
         for index, scene in enumerate(merged['scenes'], 1):
             scene['scene_number'] = index
+        apply_character_identity_locks(merged)
         merged['summary'] = ' '.join(summaries)
         if progress_callback:
             progress_callback(len(batches), len(batches), "AI 分批分析完成")
@@ -379,22 +424,32 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 
     full_text = "\n\n".join(pages_text)
 
-    comfy_schema = ""
-    comfy_notes = ""
-    comfy_scene_field = ""
-    if include_comfy_assets:
-        comfy_schema = '''
+    known_character_context = json.dumps(
+        _known_character_bible or [], ensure_ascii=False, indent=2)
+    character_schema = '''
   "character_bible": [
     {
-      "name": "角色姓名",
-      "identity": "身份、阵营、年代和国籍",
-      "appearance_prompt": "English appearance prompt for a consistent character reference image",
-      "consistency_prompt": "English traits that must remain consistent in later scenes",
+      "name": "角色的统一标准姓名",
+      "aliases": ["别名或称谓"],
+      "identity": "身份、阵营、年代和社会角色",
+      "age": "明确年龄或年龄段",
+      "gender": "性别",
+      "nationality_ethnicity": "准确国籍与族群，不要只写Asian",
+      "facial_features": "可重复识别的脸型、眉眼、鼻、嘴、肤色和独特标记",
+      "hair": "发型、长度、颜色、胡须",
+      "body_build": "身高感与体型",
+      "signature_costume": "准确年代服装/军服、剪裁、徽记与鞋帽",
+      "signature_colors": "必须跨场景保持的服装主色与辅色",
+      "accessories_props": "固定配饰、武器或随身道具",
+      "appearance_prompt": "Compact English full-body reference-sheet description",
+      "consistency_prompt": "Compact English immutable identity traits",
       "reference_page": 1
     }
   ],'''
+    comfy_notes = ""
+    comfy_scene_field = ""
+    if include_comfy_assets:
         comfy_notes = '''
-- character_bible 只列主要人物（最多 6 人）；appearance_prompt 必须为英文，写清年龄段、面部特征、发型、服饰/军服、道具、年代和国籍，禁止只写 Asian
 - 为剧情转折、人物首次清晰出现、关键行动或高潮场景把 is_key_scene 设为 true；全片最多 8 个 true
 '''
         comfy_scene_field = '      "is_key_scene": false,\n'
@@ -410,23 +465,29 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 6. 识别故事的准确年份或历史时期、国家、地域和人物身份，保持原作中中国人与外国人的真实国籍
 7. 现代或20世纪题材必须使用对应年代的军服、装备、车辆、建筑和发型，不得出现古装、盔甲、刀剑或宫殿
 8. 对越自卫反击战应明确为1979年前后的中越边境现代战争，准确区分中国人民解放军与越南人员
+9. 先建立主要人物视觉档案，再让所有场景严格复用；同一人物不能换脸、变年龄、换发型或任意改变服装颜色
 
 艺术风格要求：{style_desc}
 
 全文统一年代背景：{_document_period_context or '未预先锁定；必须根据当前原文识别，禁止默认成古代。'}
+
+前面批次已经确认的人物档案（如非空，必须逐字段沿用，不得重新设计）：
+{known_character_context}
 
 请严格按以下 JSON 格式返回（不要包含任何其他文字）：
 {{
   "title": "故事标题",
   "summary": "故事概述（1-2句话）",
   "characters": ["角色1", "角色2"],
-{comfy_schema}
+{character_schema}
   "scenes": [
     {{
       "scene_number": 1,
       "page_source": 1,
       "narration": "这一场景的旁白文字（中文，用于TTS配音，描述发生了什么）",
       "dialogue": ["角色名: 台词内容"],
+      "characters_present": ["本场景实际可见人物的标准姓名"],
+      "continuity_notes": "相对上一场的服装、伤痕、持有物、时间和地点变化；没有则写unchanged",
       "image_prompt": "A detailed English prompt for AI image generation. State the exact year or period, country, location and character nationality, with period-accurate clothing or uniforms, equipment, architecture and props, then describe action, lighting and composition. Style: {style_desc}.",
 {comfy_scene_field}      "mood": "tense|calm|heroic|tragic|joyful|mysterious|epic",
       "duration": 5
@@ -437,6 +498,11 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 注意事项：
 - 场景数量必须与输入页数相同，每页严格一个场景；page_source 必须填写该页输入中显示的真实页码
 - image_prompt 必须是英文，描述要详细具体，包含人物外貌、动作、场景环境、光影效果
+- character_bible 始终返回；只列本批首次出现且未包含在“前面批次”档案中的主要人物，最多补充到全片 8 人；没有新人物时返回空数组
+- “前面批次”已有角色再次出现时，必须直接复用其档案，不得在 character_bible 中重复输出或重新设计
+- 每个角色要有可区分且可复现的脸部结构、发型、体型、服装剪裁、固定色彩和标志性配饰；appearance_prompt 与 consistency_prompt 必须为英文
+- characters_present 只能列画面中实际出现的人，姓名必须与 character_bible 完全一致
+- 每个 image_prompt 必须逐字复用出场人物的关键英文外貌锚点；镜头角度、表情和姿势可以变化，身份特征不得变化
 - image_prompt 必须明确写出准确年份或时期、国家/地域及人物国籍，不能只写含糊的 Asian
 - 古代故事写明准确朝代及相应服饰建筑；近现代故事写明准确年份及相应军服、装备和建筑
 - 原文出现外国人物时必须保留其真实国籍，不得把越南人员写成中国人、欧美人或古代人物
@@ -444,7 +510,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
   period-accurate 1970s uniforms/equipment 等明确表述，并排除 ancient robes/armor/palaces
 - narration 是中文旁白，用于配音，应当流畅自然，像讲故事一样
 - 如果OCR文字不完整，请根据上下文和常识合理推断补充
-- title 不超过40个汉字，summary 不超过120个汉字，每个 image_prompt 不超过120个英文单词
+- title 不超过40个汉字，summary 不超过120个汉字，每个 image_prompt 不超过180个英文单词
 - 不要重复说明任务、JSON格式或输入原文，输出到最后一个场景后立即结束JSON
 - duration 根据场景复杂度建议3-8秒
 {comfy_notes}"""
@@ -460,7 +526,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"以下是连环画的OCR识别文字：\n\n{full_text}"},
             ],
-            temperature=0.2, json_mode=True,
+            temperature=0.2, json_mode=True, llm_rpm=llm_rpm,
         )
     except Exception as e:
         if not _unsupported_parameter(e, "response_format"):
@@ -471,7 +537,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
                 {"role": "system", "content": system_prompt + "\n\n重要：请只返回JSON，不要包含任何其他文字或markdown标记。"},
                 {"role": "user", "content": f"以下是连环画的OCR识别文字：\n\n{full_text}"},
             ],
-            temperature=0.2,
+            temperature=0.2, llm_rpm=llm_rpm,
         )
 
     if progress_callback:
@@ -495,6 +561,11 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
             if "DOCUMENT-WIDE PERIOD CONTEXT:" not in image_prompt:
                 scene['image_prompt'] = f"{_document_period_context} {image_prompt}".strip()
 
+    character_bible = _merge_character_bibles(
+        _known_character_bible, result.get('character_bible', []))
+    result['character_bible'] = character_bible
+    apply_character_identity_locks(result)
+
     _normalize_batch_page_sources(
         result.get('scenes', []),
         [int(item['page_num']) for item in ocr_results],
@@ -505,7 +576,7 @@ def analyze_story(ocr_results, art_style="cinematic", api_key=None, base_url=Non
 
 
 def refine_scene_prompt(scene, art_style="cinematic", api_key=None, base_url=None,
-                        llm_model=None):
+                        llm_model=None, llm_rpm=20):
     """优化单个场景的画面提示词（可选步骤）。
 
     Args:
@@ -525,10 +596,10 @@ def refine_scene_prompt(scene, art_style="cinematic", api_key=None, base_url=Non
     content = _chat(
         client, model,
         messages=[
-            {"role": "system", "content": f"You are an expert at writing image-generation prompts for Chinese stories from any era. First preserve the exact year or period, country, location and each character's nationality. Use period-accurate clothing or uniforms, equipment, vehicles, hairstyles, architecture and props. Never turn a modern or twentieth-century event into an ancient costume scene. For the 1979 Sino-Vietnamese border war, accurately distinguish Chinese People's Liberation Army personnel from Vietnamese personnel and exclude ancient robes, armor, swords and palaces. Style: {style_desc}. Return only the prompt text."},
+            {"role": "system", "content": f"You are an expert at writing image-generation prompts for Chinese stories from any era. Preserve every CHARACTER IDENTITY LOCK verbatim; never change a recurring person's face, apparent age, hairstyle, body build, signature clothing colors, insignia or accessories. First preserve the exact year or period, country, location and each character's nationality. Use period-accurate clothing or uniforms, equipment, vehicles, hairstyles, architecture and props. Never turn a modern or twentieth-century event into an ancient costume scene. For the 1979 Sino-Vietnamese border war, accurately distinguish Chinese People's Liberation Army personnel from Vietnamese personnel and exclude ancient robes, armor, swords and palaces. Style: {style_desc}. Return only the prompt text."},
             {"role": "user", "content": scene.get('image_prompt', '')},
         ],
-        temperature=0.8,
+        temperature=0.8, llm_rpm=llm_rpm,
     )
 
     return optimize_chinese_visual_prompt(content)

@@ -6,7 +6,7 @@
     <title>AI 影片生成系统</title>
     <link rel="icon" type="image/svg+xml"
           href="{{ url_for('static', filename='favicon.svg', v='20260730') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260729-2') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260917-2') }}">
 </head>
 <body>
     <section class="auth-gate" id="authGate">
@@ -135,6 +135,12 @@
                             <input type="text" id="llmBaseUrl" class="input"
                                    placeholder="https://api.openai.com/v1">
                         </div>
+                        <div class="form-group">
+                            <label>LLM RPM 限速 <span class="hint">(每分钟最多请求数，默认 20)</span></label>
+                            <input type="number" id="llmRpm" class="input" value="20"
+                                   min="1" max="600" step="1" inputmode="numeric">
+                            <p class="hint-text">多个任务使用相同服务地址、Key 和模型时共享此限制；请按服务商账户额度填写。</p>
+                        </div>
                         <div class="form-row">
                         <div class="form-group">
                             <label>LLM 模型 <span class="hint">(剧情理解)</span></label>
@@ -191,6 +197,12 @@
                             <label>
                                 <input type="checkbox" id="colorizePages">
                                 美化为彩色图片 <span class="hint">(保留原线稿，需支持图片编辑的图像模型)</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="reviewScenes" checked>
+                                合成前审核图片和解说词 <span class="hint">(可逐场景改文字或上传替换图片)</span>
                             </label>
                         </div>
                         <div class="form-group">
@@ -473,6 +485,6 @@
         </section>
     </div>
 
-    <script src="{{ url_for('static', filename='js/app.js', v='20260917-1') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js', v='20260917-2') }}"></script>
 </body>
 </html>

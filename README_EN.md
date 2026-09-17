@@ -117,6 +117,7 @@ The Agnes preset fills text, image, and video defaults. Use 1K and a short page 
 |---|---|
 | Page selection | Supports `1,3,5-10,12-20`; original PDF page numbers are retained |
 | AI story analysis | LLM creates narration and image prompts per source page |
+| LLM RPM limit | User-configurable text-model request limit, 1-600 RPM, default 20; matching provider/Key/model tasks share it |
 | Manual mode | Define pages per segment, duration, layout, and narration yourself |
 | Pages per segment | Combine a configurable number of PDF pages in manual mode |
 | Layout | Auto, horizontal, or vertical arrangement for combined pages |
@@ -127,13 +128,20 @@ The Agnes preset fills text, image, and video defaults. Use 1K and a short page 
 | Video engine | Static full frame, Ken Burns, or configured external engines |
 | AI cover | Generate a cover or upload one; its duration is configurable |
 | Captions | Import SRT text or download generated SRT after completion |
+| Scene review | Before TTS/rendering, edit each scene's narration and optionally upload a PNG/JPG/WEBP replacement image |
 | ComfyUI project export | Requires AI story analysis; exports selected key scenes, character references, prompts, ComfyUI JSON, and a ZIP package |
 
-The TTS confirmation screen contains one editable narration field per scene. OCR line breaks are removed before TTS so printed layout does not create artificial pauses.
+The scene-review screen contains one editable narration field per scene. OCR line breaks are removed before TTS so printed layout does not create artificial pauses.
+
+Scene review is enabled by default. Each scene shows its current image, an upload-replacement control, and editable narration. Starting an edit or selecting a file stops the 60-second automatic continuation timer. Uploaded images are normalized to RGB PNG and are then used by TTS-aligned rendering, ComfyUI export, and the final video. Disable **Review images and narration before rendering** to retain the previous text-only TTS confirmation behavior.
+
+The LLM RPM field controls text chat-completion requests only. Connection tests, story-analysis batches, and retries share the configured limiter for the same service URL, API key, and model. Image and video providers retain their separate model-specific limits. Set this value to the actual account allowance; the default is 20 RPM.
+
+With AI story analysis enabled, the application now builds a reusable visual bible for each major character: age, nationality, facial structure, hair, build, period-correct wardrobe and stable colors, insignia, accessories, and props. The same identity locks are propagated into scene images, AI covers, exported prompts, and Agnes video prompts. Later batches of a long PDF inherit identities established by earlier batches. This reduces face, wardrobe, and identity drift, although final consistency still depends on the selected image or video model.
 
 ## ComfyUI Project Export
 
-Enable **Export ComfyUI project** before starting a task. This is an optional branch: it does not change the normal PDF-to-video result. When enabled, story analysis also returns a small character bible and marks up to eight key scenes. After scene images are ready, the application creates:
+Enable **Export ComfyUI project** before starting a task. This is an optional branch: it does not change the normal PDF-to-video result. Story analysis already builds the character bible used by normal image generation; enabling this export additionally marks up to eight key scenes and packages those identities for ComfyUI. After scene images are ready, the application creates:
 
 - An importable `comfyui_workflow.json`.
 - A ZIP project package containing that workflow, all scene images, character reference images, `project_manifest.json`, prompts, narration, and an import guide.

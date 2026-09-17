@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """外部服务调用频率限制。"""
+import hashlib
 import threading
 import time
 
@@ -19,6 +20,25 @@ class IntervalRateLimiter:
             if delay > 0:
                 time.sleep(delay)
             self._last_request = time.monotonic()
+
+
+_custom_llm_limiters = {}
+_custom_llm_limiters_lock = threading.Lock()
+
+
+def get_llm_rate_limiter(requests_per_minute=20, base_url="", api_key="",
+                         model=""):
+    """Return a shared user-configurable limiter without retaining the API key."""
+    rpm = min(600, max(1, int(float(requests_per_minute or 20))))
+    key_digest = hashlib.sha256(str(api_key or "").encode("utf-8")).hexdigest()[:16]
+    scope = (str(base_url or "").strip().lower().rstrip("/"), key_digest,
+             str(model or "").strip().lower(), rpm)
+    with _custom_llm_limiters_lock:
+        limiter = _custom_llm_limiters.get(scope)
+        if limiter is None:
+            limiter = IntervalRateLimiter(rpm, safety_seconds=0.10)
+            _custom_llm_limiters[scope] = limiter
+        return limiter
 
 
 # NVIDIA 免费 API 限制为 40 RPM。LLM 与图像请求共用额度，保留 0.05 秒余量。

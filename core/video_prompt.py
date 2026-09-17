@@ -94,7 +94,11 @@ def build_scene_prompt(scene, art_style_desc="", index=0):
         en_parts.append(image_prompt)
     en_parts.append(f"Camera: {cam_en}")
     en_parts.append(mood_en)
-    en_parts.append("high definition, cinematic quality, smooth coherent motion")
+    en_parts.append(
+        "high definition, cinematic quality, smooth coherent motion; preserve the exact face, "
+        "age, hairstyle, body build, costume colors, insignia and accessories from the identity "
+        "lock and source image throughout every frame; no morphing or subject substitution"
+    )
     prompt_en = ". ".join(en_parts)
 
     return {

@@ -87,8 +87,10 @@ class AgnesVideoEngine(VideoEngine):
                   or scene.get("narration") or "A cinematic story scene").strip()
         prompt = optimize_chinese_visual_prompt(prompt)
         prompt += (
-            " Natural coherent motion, stable subject identity, smooth cinematic camera "
-            "movement, no subtitles, no logos, no readable text."
+            " Natural coherent motion, smooth cinematic camera movement. Preserve each subject's "
+            "exact face, age, hairstyle, body build, costume colors, insignia and accessories from "
+            "the first frame through the last; no morphing, face swap, identity drift, duplicate "
+            "person or subject substitution. No subtitles, no logos, no readable text."
         )
         payload = {
             "model": self.model,
@@ -99,7 +101,8 @@ class AgnesVideoEngine(VideoEngine):
             "num_frames": self._frame_count(duration),
             "frame_rate": self.frame_rate,
             "negative_prompt": (
-                "flicker, jitter, distorted anatomy, inconsistent character, subtitles, "
+                "flicker, jitter, distorted anatomy, inconsistent character, face swap, identity "
+                "drift, changing clothes, changing hairstyle, duplicate person, subtitles, "
                 "captions, logos, watermarks, readable text, "
                 + CHINESE_VISUAL_NEGATIVE_EN
             ),
